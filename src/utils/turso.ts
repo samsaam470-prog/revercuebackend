@@ -1,10 +1,5 @@
 ﻿import type { Bindings } from '../types';
 
-interface TursoResult {
-  columns: string[];
-  rows: any[][];
-}
-
 export async function tursoQuery(
   env: Bindings,
   sql: string,
@@ -25,14 +20,24 @@ export async function tursoQuery(
     }),
   });
 
+  const text = await res.text();
+
   if (!res.ok) {
-    const text = await res.text();
+    console.error('TURSO_HTTP_ERROR', res.status, text);
     throw new Error(`Turso error ${res.status}: ${text}`);
   }
 
-  const data = await res.json();
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    console.error('TURSO_PARSE_ERROR', text);
+    throw new Error(`Turso parse error: ${text}`);
+  }
+
   const result = data.results?.[0];
   if (!result || result.type === 'error') {
+    console.error('TURSO_QUERY_ERROR', JSON.stringify(result));
     throw new Error(`Turso query error: ${JSON.stringify(result)}`);
   }
 
