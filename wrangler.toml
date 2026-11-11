@@ -1,0 +1,11 @@
+﻿name = "revercue-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "revercue-db"
+database_id = "60b39623-1fdc-4722-967d-ed36a82623b9"
+
+[observability]
+enabled = true
