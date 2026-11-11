@@ -2,7 +2,7 @@
 import { SignJWT, jwtVerify } from 'jose';
 import { tursoQuery, tursoExecute } from '../utils/turso';
 import { generateId } from '../utils/ids';
-import { generateOTP, hashOTP, verifyOTP, otpExpiryISO, cooldownISO } from '../utils/otp';
+import { generateOTP, hashOTP, verifyOTP, otpExpiryISO } from '../utils/otp';
 import { sendFormSubmitEmail } from '../services/email';
 import { OTP_EXPIRY_MINUTES, OTP_MAX_ATTEMPTS, OTP_RESEND_COOLDOWN_SECONDS } from '../config/constants';
 import type { Bindings } from '../types';
@@ -26,21 +26,15 @@ auth.post('/signup', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const email = String(body.email ?? '').trim().toLowerCase();
   const password = String(body.password ?? '');
-  if (!email || !password || password.length < 8 || body.tos_accepted !== true) {
-    return c.json({ error: 'invalid_payload' }, 400);
-  }
+  if (!email || !password || password.length < 8 || body.tos_accepted !== true) return c.json({ error: 'invalid_payload' }, 400);
   const exists = await tursoQuery(c.env, `SELECT id FROM users WHERE email = ?`, [email]);
   if (exists.rows.length > 0) return c.json({ error: 'conflict' }, 409);
-
   const userId = generateId('usr');
   const now = new Date().toISOString();
   await tursoExecute(c.env, `INSERT INTO users (id, email, password_hash, plan, newsletter_opt_in, newsletter_opt_in_date, onboarding_step, created_at, updated_at) VALUES (?, ?, ?, 'free', ?, ?, 1, ?, ?)`, [userId, email, simpleHash(password), body.newsletter_opt_in ? 1 : 0, body.newsletter_opt_in ? now : null, now, now]);
-
   const code = generateOTP();
-  const codeHash = await hashOTP(code, c.env.USER_JWT_KEY);
-  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, codeHash, otpExpiryISO(OTP_EXPIRY_MINUTES), now, now]);
+  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, c.env.USER_JWT_KEY), otpExpiryISO(OTP_EXPIRY_MINUTES), now, now]);
   await sendFormSubmitEmail(c.env, email, 'Your Revercue verification code', { 'Verification code': code, 'Expires in': '5 minutes', 'Note': 'Activate the FormSubmit link first if you have not.' });
-
   return c.json({ success: true, token: await issuePreAuth(userId, email, 'signup', c.env.USER_JWT_KEY), user: { id: userId, email, plan: 'free', onboarding_step: 1, email_verified: false } }, 201);
 });
 
@@ -82,7 +76,7 @@ auth.post('/verify-email', async (c) => {
   }
   await tursoExecute(c.env, `UPDATE users SET email_verified = 1, updated_at = ? WHERE id = ?`, [new Date().toISOString(), userId]);
   await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]);
-  const user = await tursoQuery(c.env, `SELECT plan, onboarding_step FROM users WHERE id = ?`, [userId]);
+  const user = await tursoQuery(c.env, `SELECT plan FROM users WHERE id = ?`, [userId]);
   return c.json({ success: true, email_verified: true, token: await issueUserToken(userId, email, user.rows[0]?.plan ?? 'free', c.env.USER_JWT_KEY) });
 });
 

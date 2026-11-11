@@ -1,5 +1,5 @@
 ﻿import { Hono } from 'hono';
-import { tursoQuery, tursoExecute } from '../utils/turso';
+import { tursoExecute } from '../utils/turso';
 import { userAuthMiddleware } from '../middleware/user-auth';
 import type { Bindings } from '../types';
 
