@@ -197,10 +197,8 @@ proposals.post('/:id/password', async (c) => {
     return c.json({ error: 'forbidden', message: 'Password protection is not available on this plan.' }, 403);
   }
   if (!b.password || String(b.password).length < 6) return c.json({ error: 'invalid_payload', message: 'Password must be at least 6 characters.' }, 400);
-  const { argon2id } = await import('hash-wasm');
-  const salt = new Uint8Array(16);
-  crypto.getRandomValues(salt);
-  const hash = await argon2id({ password: String(b.password), salt, parallelism: 1, iterations: 3, memorySize: 19456, hashLength: 32, outputType: 'encoded' });
+  const bcrypt = (await import('bcryptjs')).default;
+  const hash = await bcrypt.hash(String(b.password ?? ''), 10);
   await dbRun(c.env, `UPDATE proposals SET password_hash = ?, password_protected = 1 WHERE id = ? AND user_id = ?`, [hash as string, c.req.param('id'), uid]);
   return c.json({ success: true, password_protected: true });
 });
@@ -212,3 +210,4 @@ proposals.delete('/:id', async (c) => {
 });
 
 export default proposals;
+

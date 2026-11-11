@@ -11,8 +11,8 @@ const pub = new Hono<{ Bindings: Bindings }>();
 
 async function checkPassword(env: Bindings, hash: string | null, input: string): Promise<boolean> {
   if (!hash) return true;
-  const { argon2Verify } = await import('hash-wasm');
-  try { return await argon2Verify({ password: input, hash }); } catch { return false; }
+  const bcrypt = (await import('bcryptjs')).default;
+  try { return await bcrypt.compare(input, hash); } catch { return false; }
 }
 
 pub.get('/p/:publicId', async (c) => {
@@ -153,4 +153,5 @@ pub.post('/f/:publicId/unlock', async (c) => {
   return c.json({ success: true, session_token: generateId('sess') });
 });
 export default pub;
+
 

@@ -79,9 +79,8 @@ invoices.post('/:id/password', async (c) => {
   if (b.remove) { await dbRun(c.env, `UPDATE invoices SET password_hash = NULL, password_protected = 0 WHERE id = ? AND user_id = ?`, [c.req.param('id'), uid]); return c.json({ success: true, password_protected: false }); }
   const plan = await getPlan(c.env, uid);
   if (PASSWORD_PROTECTED_LIMIT[plan as keyof typeof PASSWORD_PROTECTED_LIMIT] === 0) return c.json({ error: 'forbidden' }, 403);
-  const { argon2id } = await import('hash-wasm');
-  const salt = new Uint8Array(16); crypto.getRandomValues(salt);
-  const hash = await argon2id({ password: String(b.password ?? ''), salt, parallelism: 1, iterations: 3, memorySize: 19456, hashLength: 32, outputType: 'encoded' });
+  const bcrypt = (await import('bcryptjs')).default;
+  const hash = await bcrypt.hash(String(b.password ?? ''), 10);
   await dbRun(c.env, `UPDATE invoices SET password_hash = ?, password_protected = 1 WHERE id = ? AND user_id = ?`, [hash as string, c.req.param('id'), uid]);
   return c.json({ success: true, password_protected: true });
 });
@@ -93,3 +92,4 @@ invoices.delete('/:id', async (c) => {
 });
 
 export default invoices;
+
