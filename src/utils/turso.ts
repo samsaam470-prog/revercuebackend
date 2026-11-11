@@ -1,5 +1,15 @@
 ﻿import type { Bindings } from '../types';
 
+function encodeArg(a: any): { type: string; value: string } {
+  if (a === null || a === undefined) {
+    return { type: 'text', value: '' };
+  }
+  if (typeof a === 'number' || typeof a === 'bigint') {
+    return { type: 'integer', value: String(a) };
+  }
+  return { type: 'text', value: String(a) };
+}
+
 export async function tursoQuery(
   env: Bindings,
   sql: string,
@@ -14,7 +24,7 @@ export async function tursoQuery(
     },
     body: JSON.stringify({
       requests: [
-        { type: 'execute', stmt: { sql, args: args.map((a) => ({ type: 'text', value: a === null || a === undefined ? null : String(a) })) } },
+        { type: 'execute', stmt: { sql, args: args.map(encodeArg) } },
         { type: 'close' },
       ],
     }),
