@@ -80,13 +80,18 @@ async function fetchClientMetadata(url: string): Promise<{ title: string; descri
 }
 
 async function fetchOpenverseImage(query: string): Promise<string | null> {
-  const url = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}&page_size=5&license_type=all-cc`;
+  const url = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}&page_size=10&license_type=all-cc`;
   const res = await safeFetch(url);
   if (!res) return null;
   try {
     const data: any = await res.json();
-    const first = data?.results?.[0];
-    return first?.url ?? null;
+    const results = data?.results ?? [];
+    const allowed = ['cc0', 'by', 'pdm'];
+    for (const r of results) {
+      const lic = String(r.license ?? '').toLowerCase();
+      if (allowed.includes(lic)) return r.url ?? null;
+    }
+    return null;
   } catch { return null; }
 }
 
@@ -152,3 +157,4 @@ export async function fetchVisualAssets(env: Bindings, requests: { type: string;
   }
   return out;
 }
+

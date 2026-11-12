@@ -30,6 +30,23 @@ adminActions.post('/waitlist/:id/mark-paid', async (c) => {
   return c.json({ success: true });
 });
 
+adminActions.post('/upgrade-requests/:id/confirm', async (c) => {
+  const b = await c.req.json().catch(() => ({}));
+  const req = await tursoQuery(c.env, `SELECT user_id, plan_requested FROM payment_requests WHERE id = ?`, [c.req.param('id')]);
+  if (req.rows.length === 0) return c.json({ error: 'not_found' }, 404);
+  const userId = req.rows[0].user_id;
+  const plan = b.plan ?? req.rows[0].plan_requested;
+  const now = new Date().toISOString();
+  await tursoExecute(c.env, `UPDATE users SET plan = ?, plan_expires_at = ?, updated_at = ? WHERE id = ?`, [plan, new Date(Date.now() + 30 * 86400000).toISOString(), now, userId]);
+  await tursoExecute(c.env, `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at) VALUES (?, ?, ?, ?, 'USD', 'payoneer', ?, 'paid', ?, ?)`, [generateId('pay'), userId, plan, b.amount ?? 0, b.reference ?? null, now, now]);
+  await tursoExecute(c.env, `UPDATE payment_requests SET status = 'confirmed' WHERE id = ?`, [c.req.param('id')]);
+  return c.json({ success: true, user_id: userId, plan });
+});
+
+adminActions.get('/upgrade-requests', async (c) => {
+  const rows = await tursoQuery(c.env, `SELECT * FROM payment_requests WHERE status = 'pending' ORDER BY created_at DESC LIMIT 100`);
+  return c.json({ data: rows.rows });
+});
 adminActions.post('/payments', async (c) => {
   const b = await c.req.json();
   if (!b.user_id || !b.amount) return c.json({ error: 'invalid_payload' }, 400);
@@ -82,3 +99,4 @@ adminActions.delete('/notes/:id', async (c) => {
 });
 
 export default adminActions;
+

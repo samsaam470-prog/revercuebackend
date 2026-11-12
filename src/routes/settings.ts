@@ -176,6 +176,11 @@ settings.get('/price-suggestion/:clientId', async (c) => {
   return c.json(result);
 });
 
+settings.get('/upgrade-status', async (c) => {
+  const uid = (c.get('user' as never) as any).sub;
+  const rows = await tursoQuery(c.env, `SELECT id, plan_requested, status, created_at FROM payment_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 5`, [uid]);
+  return c.json({ data: rows.rows });
+});
 settings.get('/what-revercue-knows', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   const plan = await getPlan(c.env, uid);
@@ -200,3 +205,4 @@ settings.post('/cancel-deletion', async (c) => {
 });
 
 export default settings;
+
