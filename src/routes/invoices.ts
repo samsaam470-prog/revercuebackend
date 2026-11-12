@@ -4,16 +4,10 @@ import { tursoQuery } from '../utils/turso';
 import { generateId, generatePublicId } from '../utils/ids';
 import { userAuthMiddleware } from '../middleware/user-auth';
 import { createNotification } from '../services/notifications';
-import { ACTIVE_DOCUMENT_LIMIT, DRAFT_RETENTION_DAYS, PASSWORD_PROTECTED_LIMIT } from '../config/constants';
 import type { Bindings } from '../types';
 
 const invoices = new Hono<{ Bindings: Bindings }>();
 invoices.use('*', userAuthMiddleware);
-
-async function getPlan(env: Bindings, uid: string): Promise<string> {
-  const u = await tursoQuery(env, `SELECT plan FROM users WHERE id = ?`, [uid]);
-  return u.rows[0]?.plan ?? 'free';
-}
 
 invoices.get('/', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
@@ -24,15 +18,12 @@ invoices.get('/', async (c) => {
 invoices.post('/draft', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   const b = await c.req.json().catch(() => ({}));
-  if (!b.client_id || !b.line_items || !Array.isArray(b.line_items) || b.line_items.length === 0) return c.json({ error: 'invalid_payload' }, 400);
-  const plan = await getPlan(c.env, uid);
-  const published = await dbQuery(c.env, `SELECT COUNT(*) as c FROM invoices WHERE user_id = ? AND status = 'published'`, [uid]);
-  if (Number(published[0]?.c ?? 0) >= ACTIVE_DOCUMENT_LIMIT[plan as keyof typeof ACTIVE_DOCUMENT_LIMIT]) return c.json({ error: 'plan_limit_reached' }, 403);
+  if (!b.client_id || !b.line_items) return c.json({ error: 'invalid_payload' }, 400);
   const id = generateId('inv');
   const now = new Date().toISOString();
   const count = await dbQuery(c.env, `SELECT COUNT(*) as c FROM invoices WHERE user_id = ?`, [uid]);
   const invoiceNumber = `INV-${new Date().getFullYear()}-${String(Number(count[0]?.c ?? 0) + 1).padStart(4, '0')}`;
-  await dbRun(c.env, `INSERT INTO invoices (id, user_id, client_id, linked_contract_id, invoice_number, line_items, currency, tax, total, payment_arrangement, due_date, notes, status, draft_created_at, draft_retention_days, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)`, [id, uid, b.client_id, b.linked_contract_id ?? null, invoiceNumber, JSON.stringify(b.line_items), b.currency ?? 'USD', b.tax ?? 0, b.total ?? 0, JSON.stringify(b.payment_arrangement ?? {}), b.due_date ?? null, b.notes ?? null, now, DRAFT_RETENTION_DAYS[plan as keyof typeof DRAFT_RETENTION_DAYS], now, now]);
+  await dbRun(c.env, `INSERT INTO invoices (id, user_id, client_id, linked_contract_id, invoice_number, line_items, currency, tax, total, payment_arrangement, due_date, notes, status, draft_created_at, draft_retention_days, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, 30, ?, ?)`, [id, uid, b.client_id, b.linked_contract_id ?? null, invoiceNumber, JSON.stringify(b.line_items), b.currency ?? 'USD', b.tax ?? 0, b.total ?? 0, JSON.stringify(b.payment_arrangement ?? {}), b.due_date ?? null, b.notes ?? null, now, now, now]);
   return c.json({ success: true, id, invoice_number: invoiceNumber, status: 'draft' }, 201);
 });
 
@@ -66,23 +57,12 @@ invoices.post('/:id/confirm-payment', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   const now = new Date().toISOString();
   await dbRun(c.env, `UPDATE invoices SET status = 'confirmed', confirmed_at = ?, updated_at = ? WHERE id = ? AND user_id = ?`, [now, now, c.req.param('id'), uid]);
-  const row = (await dbFirst(c.env, `SELECT total, currency FROM invoices WHERE id = ? AND user_id = ?`, [c.req.param('id'), uid])) as any;
+  const row = (await dbFirst(c.env, `SELECT total, currency, client_id FROM invoices WHERE id = ? AND user_id = ?`, [c.req.param('id'), uid])) as any;
   if (row) {
     await tursoQuery(c.env, `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at) VALUES (?, ?, 'invoice', ?, ?, 'payoneer', ?, 'paid', ?, ?)`, [generateId('pay'), uid, row.total ?? 0, row.currency ?? 'USD', c.req.param('id'), now, now]);
+    await createNotification(c.env, { userId: uid, eventType: 'invoice_paid', clientId: row.client_id, documentId: c.req.param('id'), title: 'Payment confirmed' });
   }
   return c.json({ success: true, status: 'confirmed' });
-});
-
-invoices.post('/:id/password', async (c) => {
-  const uid = (c.get('user' as never) as any).sub;
-  const b = await c.req.json();
-  if (b.remove) { await dbRun(c.env, `UPDATE invoices SET password_hash = NULL, password_protected = 0 WHERE id = ? AND user_id = ?`, [c.req.param('id'), uid]); return c.json({ success: true, password_protected: false }); }
-  const plan = await getPlan(c.env, uid);
-  if (PASSWORD_PROTECTED_LIMIT[plan as keyof typeof PASSWORD_PROTECTED_LIMIT] === 0) return c.json({ error: 'forbidden' }, 403);
-  const bcrypt = (await import('bcryptjs')).default;
-  const hash = await bcrypt.hash(String(b.password ?? ''), 10);
-  await dbRun(c.env, `UPDATE invoices SET password_hash = ?, password_protected = 1 WHERE id = ? AND user_id = ?`, [hash as string, c.req.param('id'), uid]);
-  return c.json({ success: true, password_protected: true });
 });
 
 invoices.delete('/:id', async (c) => {
@@ -92,4 +72,3 @@ invoices.delete('/:id', async (c) => {
 });
 
 export default invoices;
-

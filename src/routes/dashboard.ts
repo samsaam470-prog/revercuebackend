@@ -16,15 +16,7 @@ dashboard.get('/summary', async (c) => {
   const followUps = await dbQuery(c.env, `SELECT COUNT(*) as c FROM communication_log WHERE user_id = ? AND follow_up_done = 0 AND follow_up_date <= ?`, [uid, new Date().toISOString()]);
   const revenue = await getRevenueSummary(c.env, uid);
   const unread = await getUnreadCount(c.env, uid);
-  return c.json({
-    active_documents: Number(active[0]?.c ?? 0),
-    clients: Number(clients[0]?.c ?? 0),
-    follow_ups_due: Number(followUps[0]?.c ?? 0),
-    revenue_this_month: revenue.earned_total,
-    pending_total: revenue.pending_total,
-    pending_count: revenue.pending_count,
-    unread_notifications: unread,
-  });
+  return c.json({ active_documents: Number(active[0]?.c ?? 0), clients: Number(clients[0]?.c ?? 0), follow_ups_due: Number(followUps[0]?.c ?? 0), revenue_this_month: revenue.earned_total, pending_total: revenue.pending_total, pending_count: revenue.pending_count, unread_notifications: unread });
 });
 
 dashboard.get('/suggestions', async (c) => {
@@ -32,25 +24,8 @@ dashboard.get('/suggestions', async (c) => {
   const user = await tursoQuery(c.env, `SELECT plan FROM users WHERE id = ?`, [uid]);
   const plan = user.rows[0]?.plan ?? 'free';
   if (plan === 'free' || plan === 'starter') return c.json({ suggestions: [] });
-  const rows = await dbQuery(
-    c.env,
-    `SELECT p.id as document_id, p.client_id, p.published_at, c.name as client_name
-     FROM proposals p JOIN clients c ON p.client_id = c.id
-     WHERE p.user_id = ? AND p.status = 'published' AND p.published_at < ?
-     LIMIT 5`,
-    [uid, new Date(Date.now() - 2 * 86400000).toISOString()]
-  );
-  return c.json({
-    suggestions: rows.map((r: any) => ({
-      id: `sug_${r.document_id}`,
-      type: 'follow_up',
-      client_id: r.client_id,
-      document_id: r.document_id,
-      title: `Follow up with ${r.client_name}`,
-      body: 'Proposal sent 2+ days ago, no response.',
-      action_url: `/crm/${r.client_id}`,
-    })),
-  });
+  const rows = await dbQuery(c.env, `SELECT p.id as document_id, p.client_id, p.published_at, c.name as client_name FROM proposals p JOIN clients c ON p.client_id = c.id WHERE p.user_id = ? AND p.status = 'published' AND p.published_at < ? LIMIT 5`, [uid, new Date(Date.now() - 2 * 86400000).toISOString()]);
+  return c.json({ suggestions: rows.map((r: any) => ({ id: `sug_${r.document_id}`, type: 'follow_up', client_id: r.client_id, document_id: r.document_id, title: `Follow up with ${r.client_name}`, body: 'Proposal sent 2+ days ago, no response.', action_url: `/crm/${r.client_id}` })) });
 });
 
 dashboard.get('/activity', async (c) => {

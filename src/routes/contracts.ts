@@ -1,23 +1,17 @@
 ﻿import { Hono } from 'hono';
 import { dbQuery, dbFirst, dbRun } from '../utils/db';
-import { tursoQuery } from '../utils/turso';
 import { generateId, generatePublicId } from '../utils/ids';
 import { userAuthMiddleware } from '../middleware/user-auth';
 import { createNotification } from '../services/notifications';
-import { ACTIVE_DOCUMENT_LIMIT, ARCHIVE_COUNT_LIMIT, ARCHIVE_RETENTION_DAYS, DRAFT_RETENTION_DAYS, PASSWORD_PROTECTED_LIMIT } from '../config/constants';
+import { scheduleSummary } from '../services/summary';
 import type { Bindings } from '../types';
 
 const contracts = new Hono<{ Bindings: Bindings }>();
 contracts.use('*', userAuthMiddleware);
 
-async function getPlan(env: Bindings, uid: string): Promise<string> {
-  const u = await tursoQuery(env, `SELECT plan FROM users WHERE id = ?`, [uid]);
-  return u.rows[0]?.plan ?? 'free';
-}
-
 contracts.get('/', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
-  const rows = await dbQuery(c.env, `SELECT id, title, client_id, status, public_id, total_time_spent_seconds, created_at FROM contracts WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`, [uid]);
+  const rows = await dbQuery(c.env, `SELECT id, title, client_id, status, public_id, created_at FROM contracts WHERE user_id = ? ORDER BY created_at DESC LIMIT 100`, [uid]);
   return c.json({ data: rows });
 });
 
@@ -25,13 +19,9 @@ contracts.post('/draft', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   const b = await c.req.json().catch(() => ({}));
   if (!b.client_id || !b.title) return c.json({ error: 'invalid_payload' }, 400);
-  const plan = await getPlan(c.env, uid);
-  const published = await dbQuery(c.env, `SELECT COUNT(*) as c FROM contracts WHERE user_id = ? AND status = 'published'`, [uid]);
-  if (Number(published[0]?.c ?? 0) >= ACTIVE_DOCUMENT_LIMIT[plan as keyof typeof ACTIVE_DOCUMENT_LIMIT]) return c.json({ error: 'plan_limit_reached' }, 403);
   const id = generateId('con');
   const now = new Date().toISOString();
-  const content = { scope: b.scope ?? null, payment_terms: b.payment_terms ?? null, timeline: b.timeline ?? null, revisions: b.revisions ?? null, cancellation: b.cancellation ?? null, currency: b.currency ?? 'USD' };
-  await dbRun(c.env, `INSERT INTO contracts (id, user_id, client_id, linked_proposal_id, title, content, after_approval, status, draft_created_at, draft_retention_days, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?)`, [id, uid, b.client_id, b.linked_proposal_id ?? null, b.title, JSON.stringify(content), b.after_approval ?? 'pdf_only', now, DRAFT_RETENTION_DAYS[plan as keyof typeof DRAFT_RETENTION_DAYS], now, now]);
+  await dbRun(c.env, `INSERT INTO contracts (id, user_id, client_id, linked_proposal_id, title, content, after_approval, status, draft_created_at, draft_retention_days, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, 30, ?, ?)`, [id, uid, b.client_id, b.linked_proposal_id ?? null, b.title, JSON.stringify(b.content ?? {}), b.after_approval ?? 'pdf_only', now, now, now]);
   return c.json({ success: true, id, status: 'draft' }, 201);
 });
 
@@ -61,30 +51,6 @@ contracts.post('/:id/publish', async (c) => {
   return c.json({ success: true, public_id: publicId, url: `https://revercue.pages.dev/c/${publicId}` });
 });
 
-contracts.post('/:id/archive', async (c) => {
-  const uid = (c.get('user' as never) as any).sub;
-  const plan = await getPlan(c.env, uid);
-  const archived = await dbQuery(c.env, `SELECT COUNT(*) as c FROM contracts WHERE user_id = ? AND status = 'archived'`, [uid]);
-  if (Number(archived[0]?.c ?? 0) >= ARCHIVE_COUNT_LIMIT[plan as keyof typeof ARCHIVE_COUNT_LIMIT]) return c.json({ error: 'archive_limit_reached' }, 403);
-  const now = new Date().toISOString();
-  const days = ARCHIVE_RETENTION_DAYS[plan as keyof typeof ARCHIVE_RETENTION_DAYS];
-  const del = new Date(Date.now() + days * 86400000).toISOString();
-  await dbRun(c.env, `UPDATE contracts SET status = 'archived', archived_at = ?, archive_retention_days = ?, archive_deletion_date = ?, updated_at = ? WHERE id = ? AND user_id = ?`, [now, days, del, now, c.req.param('id'), uid]);
-  return c.json({ success: true, status: 'archived', archive_deletion_date: del });
-});
-
-contracts.post('/:id/password', async (c) => {
-  const uid = (c.get('user' as never) as any).sub;
-  const b = await c.req.json();
-  if (b.remove) { await dbRun(c.env, `UPDATE contracts SET password_hash = NULL, password_protected = 0 WHERE id = ? AND user_id = ?`, [c.req.param('id'), uid]); return c.json({ success: true, password_protected: false }); }
-  const plan = await getPlan(c.env, uid);
-  if (PASSWORD_PROTECTED_LIMIT[plan as keyof typeof PASSWORD_PROTECTED_LIMIT] === 0) return c.json({ error: 'forbidden' }, 403);
-  const bcrypt = (await import('bcryptjs')).default;
-  const hash = await bcrypt.hash(String(b.password ?? ''), 10);
-  await dbRun(c.env, `UPDATE contracts SET password_hash = ?, password_protected = 1 WHERE id = ? AND user_id = ?`, [hash as string, c.req.param('id'), uid]);
-  return c.json({ success: true, password_protected: true });
-});
-
 contracts.delete('/:id', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   await dbRun(c.env, `DELETE FROM contracts WHERE id = ? AND user_id = ?`, [c.req.param('id'), uid]);
@@ -92,4 +58,3 @@ contracts.delete('/:id', async (c) => {
 });
 
 export default contracts;
-

@@ -1,4 +1,5 @@
 ﻿import { Hono } from 'hono';
+import bcrypt from 'bcryptjs';
 import { tursoQuery, tursoExecute } from '../utils/turso';
 import { dbQuery, dbRun } from '../utils/db';
 import { generateId } from '../utils/ids';
@@ -41,6 +42,42 @@ settings.post('/plan/upgrade-request', async (c) => {
   const b = await c.req.json();
   await tursoExecute(c.env, `INSERT INTO payment_requests (id, user_id, plan_requested, status, created_at) VALUES (?, ?, ?, 'pending', ?)`, [generateId('preq'), uid, b.plan, new Date().toISOString()]);
   return c.json({ success: true }, 201);
+});
+
+settings.post('/security/change-password', async (c) => {
+  const uid = (c.get('user' as never) as any).sub;
+  const b = await c.req.json();
+  const user = await tursoQuery(c.env, `SELECT password_hash FROM users WHERE id = ?`, [uid]);
+  if (!user.rows[0]?.password_hash) return c.json({ error: 'forbidden', message: 'Google users have no password.' }, 403);
+  if (!(await bcrypt.compare(String(b.current_password ?? ''), user.rows[0].password_hash))) return c.json({ error: 'invalid_credentials' }, 401);
+  if (!b.new_password || String(b.new_password).length < 8) return c.json({ error: 'invalid_payload' }, 400);
+  const hash = await bcrypt.hash(String(b.new_password), 10);
+  await tursoExecute(c.env, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, [hash, new Date().toISOString(), uid]);
+  await tursoExecute(c.env, `UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`, [new Date().toISOString(), uid]);
+  return c.json({ success: true });
+});
+
+settings.post('/security/2fa', async (c) => {
+  const uid = (c.get('user' as never) as any).sub;
+  const b = await c.req.json();
+  const user = await tursoQuery(c.env, `SELECT password_hash FROM users WHERE id = ?`, [uid]);
+  if (user.rows[0]?.password_hash) {
+    if (!(await bcrypt.compare(String(b.current_password ?? ''), user.rows[0].password_hash))) return c.json({ error: 'invalid_credentials' }, 401);
+  }
+  await tursoExecute(c.env, `UPDATE users SET two_factor_enabled = ?, updated_at = ? WHERE id = ?`, [b.enabled ? 1 : 0, new Date().toISOString(), uid]);
+  return c.json({ success: true, two_factor_enabled: !!b.enabled });
+});
+
+settings.get('/security/sessions', async (c) => {
+  const uid = (c.get('user' as never) as any).sub;
+  const rows = await tursoQuery(c.env, `SELECT id, device, browser, ip_hash, location, last_active_at, created_at FROM sessions WHERE user_id = ? AND revoked_at IS NULL ORDER BY last_active_at DESC`, [uid]);
+  return c.json({ sessions: rows.rows });
+});
+
+settings.post('/security/sessions/logout-all', async (c) => {
+  const uid = (c.get('user' as never) as any).sub;
+  await tursoExecute(c.env, `UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`, [new Date().toISOString(), uid]);
+  return c.json({ success: true });
 });
 
 settings.get('/notifications', async (c) => {
@@ -113,7 +150,7 @@ settings.delete('/saved-packages/:id', async (c) => {
 settings.get('/revenue', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   const plan = await getPlan(c.env, uid);
-  if (!REVENUE_TRACKER[plan as keyof typeof REVENUE_TRACKER]) return c.json({ error: 'forbidden', message: 'Revenue tracker is available on Scale.' }, 403);
+  if (!REVENUE_TRACKER[plan as keyof typeof REVENUE_TRACKER]) return c.json({ error: 'forbidden' }, 403);
   const summary = await getRevenueSummary(c.env, uid);
   const expenses = await dbQuery(c.env, `SELECT * FROM expenses WHERE user_id = ? ORDER BY date DESC LIMIT 100`, [uid]);
   return c.json({ ...summary, expenses });
@@ -141,7 +178,7 @@ settings.post('/delete-account', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   const b = await c.req.json();
   const user = await tursoQuery(c.env, `SELECT email FROM users WHERE id = ?`, [uid]);
-  if (b.email_confirmation !== user.rows[0]?.email) return c.json({ error: 'invalid_payload', message: 'Email confirmation does not match.' }, 400);
+  if (b.email_confirmation !== user.rows[0]?.email) return c.json({ error: 'invalid_payload' }, 400);
   await tursoExecute(c.env, `UPDATE users SET deletion_requested_at = ?, updated_at = ? WHERE id = ?`, [new Date().toISOString(), new Date().toISOString(), uid]);
   return c.json({ success: true, deletion_date: new Date(Date.now() + 5 * 86400000).toISOString() });
 });
