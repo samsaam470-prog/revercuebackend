@@ -155,5 +155,45 @@ pub.get('/i/:publicId/pdf', async (c) => {
   if (!pdf) return c.json({ error: 'pdf_failed' }, 500);
   return new Response(pdf.html, { headers: { 'Content-Type': 'text/html', 'Content-Disposition': `inline; filename="${row.id}.html"` } });
 });
+pub.post('/p/:publicId/close', async (c) => {
+  const row = (await dbFirst(c.env, `SELECT id, user_id FROM proposals WHERE public_id = ?`, [c.req.param('publicId')])) as any;
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  const b = await c.req.json().catch(() => ({}));
+  const seconds = Math.max(0, Math.min(Number(b.time_spent_seconds ?? 0), 3600));
+  const { dbRun } = await import('../utils/db');
+  await dbRun(c.env, `UPDATE document_visits SET closed_at = ?, time_spent_seconds = ? WHERE document_id = ? AND closed_at IS NULL`, [new Date().toISOString(), seconds, row.id]);
+  return c.json({ success: true });
+});
+
+pub.post('/c/:publicId/close', async (c) => {
+  const row = (await dbFirst(c.env, `SELECT id FROM contracts WHERE public_id = ?`, [c.req.param('publicId')])) as any;
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  const b = await c.req.json().catch(() => ({}));
+  const seconds = Math.max(0, Math.min(Number(b.time_spent_seconds ?? 0), 3600));
+  const { dbRun } = await import('../utils/db');
+  await dbRun(c.env, `UPDATE document_visits SET closed_at = ?, time_spent_seconds = ? WHERE document_id = ? AND closed_at IS NULL`, [new Date().toISOString(), seconds, row.id]);
+  return c.json({ success: true });
+});
+
+pub.post('/i/:publicId/close', async (c) => {
+  const row = (await dbFirst(c.env, `SELECT id FROM invoices WHERE public_id = ?`, [c.req.param('publicId')])) as any;
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  const b = await c.req.json().catch(() => ({}));
+  const seconds = Math.max(0, Math.min(Number(b.time_spent_seconds ?? 0), 3600));
+  const { dbRun } = await import('../utils/db');
+  await dbRun(c.env, `UPDATE document_visits SET closed_at = ?, time_spent_seconds = ? WHERE document_id = ? AND closed_at IS NULL`, [new Date().toISOString(), seconds, row.id]);
+  return c.json({ success: true });
+});
+
+pub.post('/f/:publicId/close', async (c) => {
+  const row = (await dbFirst(c.env, `SELECT id FROM forms WHERE public_id = ?`, [c.req.param('publicId')])) as any;
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  const b = await c.req.json().catch(() => ({}));
+  const seconds = Math.max(0, Math.min(Number(b.time_spent_seconds ?? 0), 3600));
+  const { dbRun } = await import('../utils/db');
+  await dbRun(c.env, `UPDATE document_visits SET closed_at = ?, time_spent_seconds = ? WHERE document_id = ? AND closed_at IS NULL`, [new Date().toISOString(), seconds, row.id]);
+  return c.json({ success: true });
+});
 export default pub;
+
 

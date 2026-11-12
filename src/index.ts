@@ -51,10 +51,15 @@ app.route('/api/extract', extractRouter);
 app.route('/api/organize', organizeRouter);
 app.route('/api/summary', summaryRouter);
 
-app.onError((err, c) => {
+app.onError(async (err, c) => {
   console.error('Unhandled error:', err);
-  console.error('Error message:', err.message);
-  return c.json({ error: 'internal_server_error', message: err.message || 'Something went wrong.' }, 500);
+  const ref = `ERR-${new Date().toISOString().slice(0,10)}-${Math.random().toString(36).slice(2, 10)}`;
+  try {
+    const { tursoExecute } = await import('./utils/turso');
+    const { generateId } = await import('./utils/ids');
+    await tursoExecute(c.env, `INSERT INTO error_logs (id, reference_code, route, message, stack, created_at) VALUES (?, ?, ?, ?, ?, ?)`, [generateId('err'), ref, c.req.path, String(err.message ?? 'unknown').slice(0, 1000), String(err.stack ?? '').slice(0, 4000), new Date().toISOString()]);
+  } catch (e) { console.error('ERROR_LOG_WRITE_FAILED', e); }
+  return c.json({ error: 'internal_server_error', message: err.message || 'Something went wrong.', reference: ref }, 500);
 });
 
 app.notFound((c) => c.json({ error: 'not_found', message: 'Route not found.' }, 404));
@@ -65,4 +70,5 @@ export default {
     ctx.waitUntil(runHourly(env));
   },
 };
+
 
