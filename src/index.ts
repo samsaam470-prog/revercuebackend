@@ -15,6 +15,7 @@ import settingsRouter from './routes/settings';
 import notificationsRouter from './routes/notifications';
 import templatesRouter from './routes/templates';
 import adminRouter from './routes/admin';
+import adminActionsRouter from './routes/admin-actions';
 import extractRouter from './routes/extract';
 import organizeRouter from './routes/organize';
 import summaryRouter from './routes/summary';
@@ -45,6 +46,7 @@ app.route('/api/settings', settingsRouter);
 app.route('/api/notifications', notificationsRouter);
 app.route('/api/templates', templatesRouter);
 app.route('/api/admin', adminRouter);
+app.route('/api/admin', adminActionsRouter);
 app.route('/api/extract', extractRouter);
 app.route('/api/organize', organizeRouter);
 app.route('/api/summary', summaryRouter);
@@ -63,3 +65,4 @@ export default {
     ctx.waitUntil(runHourly(env));
   },
 };
+

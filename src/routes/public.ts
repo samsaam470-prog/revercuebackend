@@ -128,4 +128,32 @@ pub.post('/f/:publicId/submit', async (c) => {
   return c.json({ success: true, generated_prompt: prompt });
 });
 
+
+pub.get('/p/:publicId/pdf', async (c) => {
+  const row = (await dbFirst(c.env, `SELECT id FROM proposals WHERE public_id = ?`, [c.req.param('publicId')])) as any;
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  const { generateDocumentPdf } = await import('../services/pdf');
+  const pdf = await generateDocumentPdf(c.env, 'proposal', row.id);
+  if (!pdf) return c.json({ error: 'pdf_failed' }, 500);
+  return new Response(pdf.html, { headers: { 'Content-Type': 'text/html', 'Content-Disposition': `inline; filename="${row.id}.html"` } });
+});
+
+pub.get('/c/:publicId/pdf', async (c) => {
+  const row = (await dbFirst(c.env, `SELECT id FROM contracts WHERE public_id = ?`, [c.req.param('publicId')])) as any;
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  const { generateDocumentPdf } = await import('../services/pdf');
+  const pdf = await generateDocumentPdf(c.env, 'contract', row.id);
+  if (!pdf) return c.json({ error: 'pdf_failed' }, 500);
+  return new Response(pdf.html, { headers: { 'Content-Type': 'text/html', 'Content-Disposition': `inline; filename="${row.id}.html"` } });
+});
+
+pub.get('/i/:publicId/pdf', async (c) => {
+  const row = (await dbFirst(c.env, `SELECT id FROM invoices WHERE public_id = ?`, [c.req.param('publicId')])) as any;
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  const { generateDocumentPdf } = await import('../services/pdf');
+  const pdf = await generateDocumentPdf(c.env, 'invoice', row.id);
+  if (!pdf) return c.json({ error: 'pdf_failed' }, 500);
+  return new Response(pdf.html, { headers: { 'Content-Type': 'text/html', 'Content-Disposition': `inline; filename="${row.id}.html"` } });
+});
 export default pub;
+
