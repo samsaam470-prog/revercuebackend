@@ -17,3 +17,7 @@ B2_KEY_ID = "your_b2_key_id_here"
 B2_S3_ENDPOINT = "https://s3.us-east-005.backblazeb2.com"
 FRONTEND_ORIGIN = "https://revercue.pages.dev"
 TURSO_URL = "libsql://revercue-auth-revercue.aws-ap-south-1.turso.io"
+
+[triggers]
+crons = ["0 * * * *"]
+
