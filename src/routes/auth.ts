@@ -35,10 +35,13 @@ async function issuePreAuth(userId: string, email: string, purpose: string, key:
     .sign(new TextEncoder().encode(key));
 }
 
-async function createSession(env: Bindings, userId: string, jwtId: string): Promise<void> {
+async function createSession(env: Bindings, userId: string, jwtId: string, ua?: string | null, ip?: string | null, country?: string | null): Promise<void> {
   const now = new Date().toISOString();
   const expires = new Date(Date.now() + 12 * 3600 * 1000).toISOString();
-  await tursoExecute(env, `INSERT INTO sessions (id, user_id, jwt_id, created_at, last_active_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`, [generateId('sess'), userId, jwtId, now, now, expires]);
+  const device = ua ? (ua.includes('Mobile') ? 'Mobile' : 'Desktop') : null;
+  const browser = ua ? (ua.includes('Edg') ? 'Edge' : ua.includes('Chrome') ? 'Chrome' : ua.includes('Firefox') ? 'Firefox' : ua.includes('Safari') ? 'Safari' : 'Other') : null;
+  const ipHash = ip ? (await import('../utils/otp')).hashOTP(ip, env.USER_JWT_KEY) : null;
+  await tursoExecute(env, `INSERT INTO sessions (id, user_id, jwt_id, device, browser, ip_hash, location, created_at, last_active_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [generateId('sess'), userId, jwtId, device, browser, ipHash, country ?? null, now, now, expires]);
 }
 
 function otpKey(env: Bindings): string {
@@ -66,6 +69,7 @@ auth.post('/signup', async (c) => {
   const code = generateOTP();
   await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), now, now]);
 
+  await tursoExecute(c.env, INSERT INTO formsubmit_activations (id, user_id, email, activation_sent_at) VALUES (?, ?, ?, ?), [generateId('fsa'), userId, email, now]);
   await sendFormSubmitEmail(c.env, email, 'Your Revercue verification code', { 'Verification code': code, 'Expires in': '5 minutes', 'Note': 'If you have not activated FormSubmit yet, click the activation link first. Then this code will arrive.' });
 
   return c.json({ success: true, token: await issuePreAuth(userId, email, 'signup', c.env.USER_JWT_KEY), user: { id: userId, email, plan: 'free', onboarding_step: 1, email_verified: false } }, 201);
@@ -103,7 +107,7 @@ auth.post('/login', async (c) => {
 
   const jti = generateId('jti');
   const token = await issueUserToken(user.id, user.email, user.plan, c.env.USER_JWT_KEY, jti);
-  await createSession(c.env, user.id, jti);
+  await createSession(c.env, user.id, jti, c.req.header('User-Agent'), c.req.header('CF-Connecting-IP'), c.req.header('CF-IPCountry'));
   await tursoExecute(c.env, `UPDATE users SET last_login_at = ? WHERE id = ?`, [new Date().toISOString(), user.id]);
   return c.json({ success: true, token, user: { id: user.id, email: user.email, plan: user.plan, onboarding_step: user.onboarding_step, two_factor_enabled: !!user.two_factor_enabled } });
 });
@@ -134,7 +138,7 @@ auth.post('/google', async (c) => {
 
   const jti = generateId('jti');
   const token = await issueUserToken(user.id, user.email, user.plan, c.env.USER_JWT_KEY, jti);
-  await createSession(c.env, user.id, jti);
+  await createSession(c.env, user.id, jti, c.req.header('User-Agent'), c.req.header('CF-Connecting-IP'), c.req.header('CF-IPCountry'));
   await tursoExecute(c.env, `UPDATE users SET last_login_at = ? WHERE id = ?`, [now, user.id]);
   return c.json({ success: true, token, user: { id: user.id, email: user.email, plan: user.plan, onboarding_step: user.onboarding_step } });
 });
@@ -164,7 +168,7 @@ auth.post('/verify-email', async (c) => {
   const user = await tursoQuery(c.env, `SELECT plan FROM users WHERE id = ?`, [userId]);
   const jti = generateId('jti');
   const token = await issueUserToken(userId, email, user.rows[0]?.plan ?? 'free', c.env.USER_JWT_KEY, jti);
-  await createSession(c.env, userId, jti);
+  await createSession(c.env, userId, jti, c.req.header('User-Agent'), c.req.header('CF-Connecting-IP'), c.req.header('CF-IPCountry'));
   return c.json({ success: true, email_verified: true, token });
 });
 
@@ -210,7 +214,7 @@ auth.post('/2fa/verify', async (c) => {
   const user = await tursoQuery(c.env, `SELECT plan, onboarding_step FROM users WHERE id = ?`, [userId]);
   const jti = generateId('jti');
   const token = await issueUserToken(userId, email, user.rows[0]?.plan ?? 'free', c.env.USER_JWT_KEY, jti);
-  await createSession(c.env, userId, jti);
+  await createSession(c.env, userId, jti, c.req.header('User-Agent'), c.req.header('CF-Connecting-IP'), c.req.header('CF-IPCountry'));
   await tursoExecute(c.env, `UPDATE users SET last_login_at = ? WHERE id = ?`, [new Date().toISOString(), userId]);
   return c.json({ success: true, token, user: { id: userId, email, plan: user.rows[0]?.plan ?? 'free', onboarding_step: user.rows[0]?.onboarding_step ?? 6 } });
 });
@@ -298,3 +302,4 @@ auth.post('/logout', async (c) => {
 });
 
 export default auth;
+
