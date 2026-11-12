@@ -1,7 +1,6 @@
 ﻿import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { Bindings } from './types';
-
 import authRouter from './routes/auth';
 import onboardingRouter from './routes/onboarding';
 import dashboardRouter from './routes/dashboard';
@@ -16,26 +15,21 @@ import settingsRouter from './routes/settings';
 import notificationsRouter from './routes/notifications';
 import templatesRouter from './routes/templates';
 import adminRouter from './routes/admin';
+import extractRouter from './routes/extract';
+import organizeRouter from './routes/organize';
+import summaryRouter from './routes/summary';
+import { runHourly } from './cron/summary';
 
 const app = new Hono<{ Bindings: Bindings }>();
 
 app.use('*', async (c, next) => {
   const configured = (c.env.FRONTEND_ORIGIN ?? '').trim();
   const origin = configured || '*';
-  const corsMiddleware = cors({
-    origin,
-    allowHeaders: ['Content-Type', 'Authorization'],
-    allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
-    exposeHeaders: ['Content-Length', 'Content-Disposition'],
-    credentials: false,
-    maxAge: 600,
-  });
+  const corsMiddleware = cors({ origin, allowHeaders: ['Content-Type', 'Authorization', 'X-Password-Session'], allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'], exposeHeaders: ['Content-Length', 'Content-Disposition'], credentials: false, maxAge: 600 });
   return corsMiddleware(c, next);
 });
 
-app.get('/api/health', (c) =>
-  c.json({ ok: true, status: 'healthy', version: '2.0.0', timestamp: new Date().toISOString() })
-);
+app.get('/api/health', (c) => c.json({ ok: true, status: 'healthy', version: '2.0.0', timestamp: new Date().toISOString() }));
 
 app.route('/api/auth', authRouter);
 app.route('/api/onboarding', onboardingRouter);
@@ -51,6 +45,9 @@ app.route('/api/settings', settingsRouter);
 app.route('/api/notifications', notificationsRouter);
 app.route('/api/templates', templatesRouter);
 app.route('/api/admin', adminRouter);
+app.route('/api/extract', extractRouter);
+app.route('/api/organize', organizeRouter);
+app.route('/api/summary', summaryRouter);
 
 app.onError((err, c) => {
   console.error('Unhandled error:', err);
@@ -60,4 +57,9 @@ app.onError((err, c) => {
 
 app.notFound((c) => c.json({ error: 'not_found', message: 'Route not found.' }, 404));
 
-export default app;
+export default {
+  fetch: app.fetch,
+  scheduled: async (event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) => {
+    ctx.waitUntil(runHourly(env));
+  },
+};
