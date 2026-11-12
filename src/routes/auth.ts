@@ -35,17 +35,17 @@ async function issuePreAuth(userId: string, email: string, purpose: string, key:
     .sign(new TextEncoder().encode(key));
 }
 
+function otpKey(env: Bindings): string {
+  return (env as any).OTP_HASH_KEY || env.USER_JWT_KEY;
+}
+
 async function createSession(env: Bindings, userId: string, jwtId: string, ua?: string | null, ip?: string | null, country?: string | null): Promise<void> {
   const now = new Date().toISOString();
   const expires = new Date(Date.now() + 12 * 3600 * 1000).toISOString();
   const device = ua ? (ua.includes('Mobile') ? 'Mobile' : 'Desktop') : null;
   const browser = ua ? (ua.includes('Edg') ? 'Edge' : ua.includes('Chrome') ? 'Chrome' : ua.includes('Firefox') ? 'Firefox' : ua.includes('Safari') ? 'Safari' : 'Other') : null;
-  const ipHash = ip ? (await import('../utils/otp')).hashOTP(ip, env.USER_JWT_KEY) : null;
+  const ipHash = ip ? await hashOTP(ip, env.USER_JWT_KEY) : null;
   await tursoExecute(env, `INSERT INTO sessions (id, user_id, jwt_id, device, browser, ip_hash, location, created_at, last_active_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [generateId('sess'), userId, jwtId, device, browser, ipHash, country ?? null, now, now, expires]);
-}
-
-function otpKey(env: Bindings): string {
-  return env.OTP_HASH_KEY || env.USER_JWT_KEY;
 }
 
 auth.post('/signup', async (c) => {
@@ -67,9 +67,11 @@ auth.post('/signup', async (c) => {
   await tursoExecute(c.env, `INSERT INTO users (id, email, password_hash, plan, newsletter_opt_in, newsletter_opt_in_date, onboarding_step, created_at, updated_at) VALUES (?, ?, ?, 'free', ?, ?, 1, ?, ?)`, [userId, email, passwordHash, body.newsletter_opt_in ? 1 : 0, body.newsletter_opt_in ? now : null, now, now]);
 
   const code = generateOTP();
-  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), now, now]);
+  const codeHash = await hashOTP(code, otpKey(c.env));
+  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, codeHash, otpExpiryISO(OTP_EXPIRY_MINUTES), now, now]);
 
   await tursoExecute(c.env, `INSERT INTO formsubmit_activations (id, user_id, email, activation_sent_at) VALUES (?, ?, ?, ?)`, [generateId('fsa'), userId, email, now]);
+
   await sendFormSubmitEmail(c.env, email, 'Your Revercue verification code', { 'Verification code': code, 'Expires in': '5 minutes', 'Note': 'If you have not activated FormSubmit yet, click the activation link first. Then this code will arrive.' });
 
   return c.json({ success: true, token: await issuePreAuth(userId, email, 'signup', c.env.USER_JWT_KEY), user: { id: userId, email, plan: 'free', onboarding_step: 1, email_verified: false } }, 201);
@@ -121,7 +123,8 @@ auth.post('/google', async (c) => {
   if (!res.ok) return c.json({ error: 'invalid_google_token' }, 401);
   const info: any = await res.json();
   if (!info.email || info.email_verified !== 'true') return c.json({ error: 'invalid_google_token' }, 401);
-  if (c.env.GOOGLE_CLIENT_ID && info.aud !== c.env.GOOGLE_CLIENT_ID) return c.json({ error: 'invalid_google_token', message: 'Audience mismatch.' }, 401);
+  const googleClientId = (c.env as any).GOOGLE_CLIENT_ID;
+  if (googleClientId && info.aud !== googleClientId) return c.json({ error: 'invalid_google_token', message: 'Audience mismatch.' }, 401);
 
   const email = String(info.email).trim().toLowerCase();
   let user = (await tursoQuery(c.env, `SELECT * FROM users WHERE email = ?`, [email])).rows[0];
@@ -302,5 +305,3 @@ auth.post('/logout', async (c) => {
 });
 
 export default auth;
-
-
