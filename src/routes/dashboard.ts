@@ -4,6 +4,7 @@ import { dbQuery } from '../utils/db';
 import { userAuthMiddleware } from '../middleware/user-auth';
 import { getUnreadCount } from '../services/notifications';
 import { getRevenueSummary } from '../services/revenue';
+import { generateSuggestions } from '../services/suggestions-engine';
 import type { Bindings } from '../types';
 
 const dashboard = new Hono<{ Bindings: Bindings }>();
@@ -23,9 +24,8 @@ dashboard.get('/suggestions', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   const user = await tursoQuery(c.env, `SELECT plan FROM users WHERE id = ?`, [uid]);
   const plan = user.rows[0]?.plan ?? 'free';
-  if (plan === 'free' || plan === 'starter') return c.json({ suggestions: [] });
-  const rows = await dbQuery(c.env, `SELECT p.id as document_id, p.client_id, p.published_at, c.name as client_name FROM proposals p JOIN clients c ON p.client_id = c.id WHERE p.user_id = ? AND p.status = 'published' AND p.published_at < ? LIMIT 5`, [uid, new Date(Date.now() - 2 * 86400000).toISOString()]);
-  return c.json({ suggestions: rows.map((r: any) => ({ id: `sug_${r.document_id}`, type: 'follow_up', client_id: r.client_id, document_id: r.document_id, title: `Follow up with ${r.client_name}`, body: 'Proposal sent 2+ days ago, no response.', action_url: `/crm/${r.client_id}` })) });
+  const suggestions = await generateSuggestions(c.env, uid, plan);
+  return c.json({ suggestions });
 });
 
 dashboard.get('/activity', async (c) => {

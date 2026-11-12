@@ -5,6 +5,7 @@ import { dbQuery, dbRun } from '../utils/db';
 import { generateId } from '../utils/ids';
 import { userAuthMiddleware } from '../middleware/user-auth';
 import { getRevenueSummary, addExpense } from '../services/revenue';
+import { getPriceSuggestion } from '../services/price-suggestion';
 import { SAVED_FAQ_LIMIT, SAVED_PACKAGE_LIMIT, REVENUE_TRACKER, EXPENSE_ENTRY, WHAT_REVERCUE_KNOWS } from '../config/constants';
 import type { Bindings } from '../types';
 
@@ -48,7 +49,7 @@ settings.post('/security/change-password', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   const b = await c.req.json();
   const user = await tursoQuery(c.env, `SELECT password_hash FROM users WHERE id = ?`, [uid]);
-  if (!user.rows[0]?.password_hash) return c.json({ error: 'forbidden', message: 'Google users have no password.' }, 403);
+  if (!user.rows[0]?.password_hash) return c.json({ error: 'forbidden' }, 403);
   if (!(await bcrypt.compare(String(b.current_password ?? ''), user.rows[0].password_hash))) return c.json({ error: 'invalid_credentials' }, 401);
   if (!b.new_password || String(b.new_password).length < 8) return c.json({ error: 'invalid_payload' }, 400);
   const hash = await bcrypt.hash(String(b.new_password), 10);
@@ -164,6 +165,15 @@ settings.post('/expenses', async (c) => {
   if (!b.amount || !b.category) return c.json({ error: 'invalid_payload' }, 400);
   const id = await addExpense(c.env, uid, b);
   return c.json({ success: true, id }, 201);
+});
+
+settings.get('/price-suggestion/:clientId', async (c) => {
+  const uid = (c.get('user' as never) as any).sub;
+  const plan = await getPlan(c.env, uid);
+  if (plan !== 'scale' && plan !== 'teams') return c.json({ error: 'forbidden' }, 403);
+  const margin = Number(c.req.query('margin') ?? 30);
+  const result = await getPriceSuggestion(c.env, uid, c.req.param('clientId'), margin);
+  return c.json(result);
 });
 
 settings.get('/what-revercue-knows', async (c) => {
