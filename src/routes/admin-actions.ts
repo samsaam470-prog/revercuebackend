@@ -55,6 +55,37 @@ adminActions.post('/payments', async (c) => {
   return c.json({ success: true, id }, 201);
 });
 
+adminActions.post('/templates/upload', async (c) => {
+  const body = await c.req.parseBody();
+  const file = body['file'] as File;
+  const name = String(body['name'] ?? '').trim();
+  const type = String(body['type'] ?? 'proposal');
+  if (!file || !name) return c.json({ error: 'invalid_payload' }, 400);
+  const { uploadToB2 } = await import('../services/storage');
+  const { sanitizeHtml } = await import('../services/storage');
+  const html = await file.text();
+  const sanitized = sanitizeHtml(html);
+  const key = `templates/${Date.now()}-${name.replace(/[^a-z0-9]/gi, '_')}.html`;
+  const ok = await uploadToB2(c.env, key, new TextEncoder().encode(sanitized).buffer as ArrayBuffer, 'text/html');
+  if (!ok) return c.json({ error: 'upload_failed' }, 500);
+  const id = generateId('tpl');
+  const now = new Date().toISOString();
+  await dbRun(c.env, `INSERT INTO templates (id, name, type, tags, b2_key, source, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'built_in', 'active', ?, ?)`, [id, name, type, JSON.stringify(body['tags'] ? String(body['tags']).split(',') : []), key, now, now]);
+  return c.json({ success: true, id, b2_key: key }, 201);
+});
+
+adminActions.get('/payments/:id/receipt', async (c) => {
+  const row = await tursoQuery(c.env, `SELECT * FROM payments WHERE id = ?`, [c.req.param('id')]);
+  if (row.rows.length === 0) return c.json({ error: 'not_found' }, 404);
+  const p = row.rows[0];
+  const { buildPdf } = await import('../services/pdf-binary');
+  const bytes = await buildPdf(`Receipt ${p.id}`, [
+    { heading: 'Payment', body: `${p.amount} ${p.currency ?? 'USD'} — ${p.status}` },
+    { heading: 'Reference', body: String(p.reference ?? '—') },
+    { heading: 'Date', body: String(p.paid_at ?? p.created_at) },
+  ]);
+  return new Response(bytes, { headers: { 'Content-Type': 'application/pdf', 'Content-Disposition': `attachment; filename="receipt-${p.id}.pdf"` } });
+});
 adminActions.post('/templates', async (c) => {
   const b = await c.req.json();
   if (!b.name || !b.type) return c.json({ error: 'invalid_payload' }, 400);
@@ -99,4 +130,5 @@ adminActions.delete('/notes/:id', async (c) => {
 });
 
 export default adminActions;
+
 

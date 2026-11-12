@@ -45,6 +45,24 @@ settings.post('/plan/upgrade-request', async (c) => {
   return c.json({ success: true }, 201);
 });
 
+settings.post('/plan/downgrade', async (c) => {
+  const uid = (c.get('user' as never) as any).sub;
+  const b = await c.req.json();
+  const targetPlan = String(b.plan ?? 'free');
+  const keepIds: string[] = Array.isArray(b.keep_document_ids) ? b.keep_document_ids : [];
+  const user = await tursoQuery(c.env, `SELECT plan FROM users WHERE id = ?`, [uid]);
+  const currentPlan = user.rows[0]?.plan ?? 'free';
+  if (currentPlan === targetPlan) return c.json({ error: 'invalid_payload', message: 'Already on this plan.' }, 400);
+  const newLimit = (await import('../config/constants')).ACTIVE_DOCUMENT_LIMIT[targetPlan as keyof typeof import('../config/constants').ACTIVE_DOCUMENT_LIMIT] ?? 5;
+  const allDocs = await dbQuery<any>(c.env, `SELECT id, title FROM proposals WHERE user_id = ? AND status = 'published'`, [uid]);
+  const toArchive = allDocs.filter((d) => !keepIds.includes(d.id)).slice(newLimit);
+  for (const d of toArchive) {
+    await dbRun(c.env, `UPDATE proposals SET status = 'archived', archived_at = ?, archive_retention_days = 30, archive_deletion_date = ?, updated_at = ? WHERE id = ?`, [new Date().toISOString(), new Date(Date.now() + 30 * 86400000).toISOString(), new Date().toISOString(), d.id]);
+  }
+  await tursoExecute(c.env, `UPDATE users SET plan = ?, updated_at = ? WHERE id = ?`, [targetPlan, new Date().toISOString(), uid]);
+  return c.json({ success: true, plan: targetPlan, archived_count: toArchive.length });
+});
+
 settings.post('/security/change-password', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   const b = await c.req.json();
@@ -205,4 +223,5 @@ settings.post('/cancel-deletion', async (c) => {
 });
 
 export default settings;
+
 
