@@ -69,7 +69,7 @@ auth.post('/signup', async (c) => {
   const code = generateOTP();
   await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), now, now]);
 
-  await tursoExecute(c.env, INSERT INTO formsubmit_activations (id, user_id, email, activation_sent_at) VALUES (?, ?, ?, ?), [generateId('fsa'), userId, email, now]);
+  await tursoExecute(c.env, `INSERT INTO formsubmit_activations (id, user_id, email, activation_sent_at) VALUES (?, ?, ?, ?)`, [generateId('fsa'), userId, email, now]);
   await sendFormSubmitEmail(c.env, email, 'Your Revercue verification code', { 'Verification code': code, 'Expires in': '5 minutes', 'Note': 'If you have not activated FormSubmit yet, click the activation link first. Then this code will arrive.' });
 
   return c.json({ success: true, token: await issuePreAuth(userId, email, 'signup', c.env.USER_JWT_KEY), user: { id: userId, email, plan: 'free', onboarding_step: 1, email_verified: false } }, 201);
@@ -302,4 +302,5 @@ auth.post('/logout', async (c) => {
 });
 
 export default auth;
+
 
