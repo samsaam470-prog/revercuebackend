@@ -3,7 +3,7 @@ import { dbQuery, dbFirst, dbRun } from '../utils/db';
 import { tursoQuery } from '../utils/turso';
 import { generateId } from '../utils/ids';
 import { userAuthMiddleware } from '../middleware/user-auth';
-import { recomputeInterest } from '../services/interest';
+import { recomputeInterest, getInterestBreakdown } from '../services/interest';
 import { scheduleSummary } from '../services/summary';
 import { NOTES_PER_CLIENT } from '../config/constants';
 import type { Bindings } from '../types';
@@ -68,6 +68,17 @@ crm.post('/clients/:id/not-interested', async (c) => {
   return c.json({ success: true, status: 'not_interested' });
 });
 
+crm.get('/clients/:id/interest', async (c) => {
+  const uid = (c.get('user' as never) as any).sub;
+  const user = await tursoQuery(c.env, `SELECT plan FROM users WHERE id = ?`, [uid]);
+  const plan = user.rows[0]?.plan ?? 'free';
+  if (plan !== 'scale' && plan !== 'teams') return c.json({ error: 'forbidden' }, 403);
+  const client = await dbFirst<any>(c.env, `SELECT interest_level, marked_not_interested_at FROM clients WHERE id = ? AND user_id = ?`, [c.req.param('id'), uid]);
+  if (!client) return c.json({ error: 'not_found' }, 404);
+  const breakdown = await getInterestBreakdown(c.env, uid, c.req.param('id'));
+  return c.json({ score: client.interest_level ?? 50, ...breakdown });
+});
+
 crm.post('/clients/:id/notes', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   const b = await c.req.json();
@@ -110,6 +121,15 @@ crm.delete('/communication/:id', async (c) => {
   const uid = (c.get('user' as never) as any).sub;
   await dbRun(c.env, `DELETE FROM communication_log WHERE id = ? AND user_id = ?`, [c.req.param('id'), uid]);
   return c.json({ success: true });
+});
+
+crm.post('/clients/:id/suggest-message', async (c) => {
+  const uid = (c.get('user' as never) as any).sub;
+  const b = await c.req.json().catch(() => ({}));
+  const draft = String(b.draft ?? '').slice(0, 2000);
+  if (!draft) return c.json({ error: 'invalid_payload' }, 400);
+  const log = await dbQuery<any>(c.env, `SELECT message_text FROM communication_log WHERE user_id = ? AND client_id = ? AND message_text IS NOT NULL ORDER BY created_at DESC LIMIT 3`, [uid, c.req.param('id')]);
+  return c.json({ success: true, draft, context: log.map((r) => r.message_text), note: 'Use the frontend Web LLM to rewrite the draft.' });
 });
 
 export default crm;
