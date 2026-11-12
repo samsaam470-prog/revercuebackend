@@ -5,6 +5,7 @@ import { tursoQuery, tursoExecute } from '../utils/turso';
 import { generateId } from '../utils/ids';
 import { generateOTP, hashOTP, verifyOTP, otpExpiryISO } from '../utils/otp';
 import { sendFormSubmitEmail } from '../services/email';
+import { checkRateLimit } from '../services/rate-limit';
 import { OTP_EXPIRY_MINUTES, OTP_MAX_ATTEMPTS, OTP_RESEND_COOLDOWN_SECONDS } from '../config/constants';
 import type { Bindings } from '../types';
 
@@ -15,19 +16,15 @@ async function hashPassword(password: string): Promise<string> {
 }
 
 async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
-  try {
-    return await bcrypt.compare(password, storedHash);
-  } catch {
-    return false;
-  }
+  try { return await bcrypt.compare(password, storedHash); } catch { return false; }
 }
 
-async function issueUserToken(userId: string, email: string, plan: string, key: string, exp = '12h'): Promise<string> {
-  return await new SignJWT({ sub: userId, email, plan })
+async function issueUserToken(userId: string, email: string, plan: string, key: string, jti?: string): Promise<string> {
+  const builder = new SignJWT({ sub: userId, email, plan, ...(jti ? { jti } : {}) })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
-    .setExpirationTime(exp)
-    .sign(new TextEncoder().encode(key));
+    .setExpirationTime('12h');
+  return await builder.sign(new TextEncoder().encode(key));
 }
 
 async function issuePreAuth(userId: string, email: string, purpose: string, key: string): Promise<string> {
@@ -44,42 +41,69 @@ async function createSession(env: Bindings, userId: string, jwtId: string): Prom
   await tursoExecute(env, `INSERT INTO sessions (id, user_id, jwt_id, created_at, last_active_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`, [generateId('sess'), userId, jwtId, now, now, expires]);
 }
 
+function otpKey(env: Bindings): string {
+  return env.OTP_HASH_KEY || env.USER_JWT_KEY;
+}
+
 auth.post('/signup', async (c) => {
+  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
+  const rl = await checkRateLimit(c.env, `signup:${ip}`, 5, 3600);
+  if (!rl.allowed) return c.json({ error: 'rate_limited', retry_after: rl.retryAfter }, 429);
+
   const body = await c.req.json().catch(() => ({}));
   const email = String(body.email ?? '').trim().toLowerCase();
   const password = String(body.password ?? '');
   if (!email || !password || password.length < 8 || body.tos_accepted !== true) return c.json({ error: 'invalid_payload' }, 400);
+
   const exists = await tursoQuery(c.env, `SELECT id FROM users WHERE email = ?`, [email]);
   if (exists.rows.length > 0) return c.json({ error: 'conflict' }, 409);
+
   const userId = generateId('usr');
   const now = new Date().toISOString();
   const passwordHash = await hashPassword(password);
   await tursoExecute(c.env, `INSERT INTO users (id, email, password_hash, plan, newsletter_opt_in, newsletter_opt_in_date, onboarding_step, created_at, updated_at) VALUES (?, ?, ?, 'free', ?, ?, 1, ?, ?)`, [userId, email, passwordHash, body.newsletter_opt_in ? 1 : 0, body.newsletter_opt_in ? now : null, now, now]);
+
   const code = generateOTP();
-  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, c.env.USER_JWT_KEY), otpExpiryISO(OTP_EXPIRY_MINUTES), now, now]);
+  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), now, now]);
+
   await sendFormSubmitEmail(c.env, email, 'Your Revercue verification code', { 'Verification code': code, 'Expires in': '5 minutes', 'Note': 'If you have not activated FormSubmit yet, click the activation link first. Then this code will arrive.' });
+
   return c.json({ success: true, token: await issuePreAuth(userId, email, 'signup', c.env.USER_JWT_KEY), user: { id: userId, email, plan: 'free', onboarding_step: 1, email_verified: false } }, 201);
 });
 
 auth.post('/login', async (c) => {
+  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
+  const rl = await checkRateLimit(c.env, `login:${ip}`, 5, 900);
+  if (!rl.allowed) return c.json({ error: 'rate_limited', retry_after: rl.retryAfter }, 429);
+
   const body = await c.req.json().catch(() => ({}));
   const email = String(body.email ?? '').trim().toLowerCase();
   const password = String(body.password ?? '');
   if (!email || !password) return c.json({ error: 'invalid_payload' }, 400);
+
   const result = await tursoQuery(c.env, `SELECT * FROM users WHERE email = ?`, [email]);
   if (result.rows.length === 0) return c.json({ error: 'invalid_credentials' }, 401);
   const user = result.rows[0];
-  const ok = await verifyPassword(password, user.password_hash ?? '');
-  if (!ok) return c.json({ error: 'invalid_credentials' }, 401);
+  if (!user.password_hash) return c.json({ error: 'invalid_credentials' }, 401);
+  if (!(await verifyPassword(password, user.password_hash))) return c.json({ error: 'invalid_credentials' }, 401);
+
+  if (user.email_verified === 0) {
+    const code = generateOTP();
+    await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), user.id, user.email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
+    await sendFormSubmitEmail(c.env, user.email, 'Your Revercue verification code', { 'Verification code': code, 'Expires in': '5 minutes' });
+    return c.json({ success: true, requires_verification: true, token: await issuePreAuth(user.id, user.email, 'signup', c.env.USER_JWT_KEY) });
+  }
+
   if (user.two_factor_enabled) {
     const code = generateOTP();
-    await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, '2fa', 0, ?, ?, ?)`, [generateId('otp'), user.id, user.email, await hashOTP(code, c.env.USER_JWT_KEY), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
+    await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, '2fa', 0, ?, ?, ?)`, [generateId('otp'), user.id, user.email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
     await sendFormSubmitEmail(c.env, user.email, 'Your Revercue 2FA code', { 'Verification code': code, 'Expires in': '5 minutes' });
     return c.json({ success: true, requires_2fa: true, pre_2fa_token: await issuePreAuth(user.id, user.email, '2fa', c.env.USER_JWT_KEY) });
   }
-  const jwtId = generateId('jti');
-  const token = await new SignJWT({ sub: user.id, email: user.email, plan: user.plan, jti: jwtId }).setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setExpirationTime('12h').sign(new TextEncoder().encode(c.env.USER_JWT_KEY));
-  await createSession(c.env, user.id, jwtId);
+
+  const jti = generateId('jti');
+  const token = await issueUserToken(user.id, user.email, user.plan, c.env.USER_JWT_KEY, jti);
+  await createSession(c.env, user.id, jti);
   await tursoExecute(c.env, `UPDATE users SET last_login_at = ? WHERE id = ?`, [new Date().toISOString(), user.id]);
   return c.json({ success: true, token, user: { id: user.id, email: user.email, plan: user.plan, onboarding_step: user.onboarding_step, two_factor_enabled: !!user.two_factor_enabled } });
 });
@@ -88,24 +112,29 @@ auth.post('/google', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const idToken = String(body.id_token ?? '');
   if (!idToken) return c.json({ error: 'invalid_payload' }, 400);
+
   const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
   if (!res.ok) return c.json({ error: 'invalid_google_token' }, 401);
   const info: any = await res.json();
   if (!info.email || info.email_verified !== 'true') return c.json({ error: 'invalid_google_token' }, 401);
+  if (c.env.GOOGLE_CLIENT_ID && info.aud !== c.env.GOOGLE_CLIENT_ID) return c.json({ error: 'invalid_google_token', message: 'Audience mismatch.' }, 401);
+
   const email = String(info.email).trim().toLowerCase();
   let user = (await tursoQuery(c.env, `SELECT * FROM users WHERE email = ?`, [email])).rows[0];
   const now = new Date().toISOString();
+
   if (!user) {
     const userId = generateId('usr');
     await tursoExecute(c.env, `INSERT INTO users (id, email, google_id, plan, email_verified, onboarding_step, created_at, updated_at) VALUES (?, ?, ?, 'free', 1, 1, ?, ?)`, [userId, email, info.sub ?? null, now, now]);
     await sendFormSubmitEmail(c.env, email, 'Welcome to Revercue', { 'Note': 'You signed up with Google. If you have not activated FormSubmit yet, click the activation link in your inbox.' });
-    user = { id: userId, email, plan: 'free', onboarding_step: 1, two_factor_enabled: 0 };
+    user = { id: userId, email, plan: 'free', onboarding_step: 1, two_factor_enabled: 0, email_verified: 1 };
   } else if (!user.google_id) {
     await tursoExecute(c.env, `UPDATE users SET google_id = ?, email_verified = 1, updated_at = ? WHERE id = ?`, [info.sub ?? null, now, user.id]);
   }
-  const jwtId = generateId('jti');
-  const token = await new SignJWT({ sub: user.id, email: user.email, plan: user.plan, jti: jwtId }).setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setExpirationTime('12h').sign(new TextEncoder().encode(c.env.USER_JWT_KEY));
-  await createSession(c.env, user.id, jwtId);
+
+  const jti = generateId('jti');
+  const token = await issueUserToken(user.id, user.email, user.plan, c.env.USER_JWT_KEY, jti);
+  await createSession(c.env, user.id, jti);
   await tursoExecute(c.env, `UPDATE users SET last_login_at = ? WHERE id = ?`, [now, user.id]);
   return c.json({ success: true, token, user: { id: user.id, email: user.email, plan: user.plan, onboarding_step: user.onboarding_step } });
 });
@@ -119,19 +148,24 @@ auth.post('/verify-email', async (c) => {
     const { payload } = await jwtVerify(header.slice(7).trim(), new TextEncoder().encode(c.env.USER_JWT_KEY));
     userId = payload.sub as string; email = payload.email as string;
   } catch { return c.json({ error: 'unauthorized' }, 401); }
+
   const row = await tursoQuery(c.env, `SELECT * FROM otp_codes WHERE user_id = ? AND purpose = 'signup' ORDER BY created_at DESC LIMIT 1`, [userId]);
   if (row.rows.length === 0) return c.json({ error: 'code_expired' }, 400);
   const otp = row.rows[0];
-  if (new Date(otp.expires_at).getTime() < Date.now()) return c.json({ error: 'code_expired' }, 400);
+  if (new Date(otp.expires_at).getTime() < Date.now()) { await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]); return c.json({ error: 'code_expired' }, 400); }
   if (Number(otp.attempts) >= OTP_MAX_ATTEMPTS) return c.json({ error: 'too_many_attempts' }, 429);
-  if (!(await verifyOTP(String(body.code ?? ''), otp.code_hash, c.env.USER_JWT_KEY))) {
+  if (!(await verifyOTP(String(body.code ?? ''), otp.code_hash, otpKey(c.env)))) {
     await tursoExecute(c.env, `UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?`, [otp.id]);
-    return c.json({ error: 'invalid_code' }, 400);
+    return c.json({ error: 'invalid_code', attempts_remaining: OTP_MAX_ATTEMPTS - Number(otp.attempts) - 1 }, 400);
   }
   await tursoExecute(c.env, `UPDATE users SET email_verified = 1, updated_at = ? WHERE id = ?`, [new Date().toISOString(), userId]);
   await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]);
+
   const user = await tursoQuery(c.env, `SELECT plan FROM users WHERE id = ?`, [userId]);
-  return c.json({ success: true, email_verified: true, token: await issueUserToken(userId, email, user.rows[0]?.plan ?? 'free', c.env.USER_JWT_KEY) });
+  const jti = generateId('jti');
+  const token = await issueUserToken(userId, email, user.rows[0]?.plan ?? 'free', c.env.USER_JWT_KEY, jti);
+  await createSession(c.env, userId, jti);
+  return c.json({ success: true, email_verified: true, token });
 });
 
 auth.post('/resend-verification', async (c) => {
@@ -142,13 +176,14 @@ auth.post('/resend-verification', async (c) => {
     const { payload } = await jwtVerify(header.slice(7).trim(), new TextEncoder().encode(c.env.USER_JWT_KEY));
     userId = payload.sub as string; email = payload.email as string;
   } catch { return c.json({ error: 'unauthorized' }, 401); }
+
   const last = await tursoQuery(c.env, `SELECT last_requested_at FROM otp_codes WHERE user_id = ? AND purpose = 'signup' ORDER BY created_at DESC LIMIT 1`, [userId]);
   if (last.rows.length > 0) {
     const elapsed = (Date.now() - new Date(last.rows[0].last_requested_at).getTime()) / 1000;
     if (elapsed < OTP_RESEND_COOLDOWN_SECONDS) return c.json({ error: 'cooldown_active', retry_after: Math.ceil(OTP_RESEND_COOLDOWN_SECONDS - elapsed) }, 429);
   }
   const code = generateOTP();
-  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, c.env.USER_JWT_KEY), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
+  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
   await sendFormSubmitEmail(c.env, email, 'Your Revercue verification code', { 'Verification code': code, 'Expires in': '5 minutes' });
   return c.json({ success: true, cooldown_seconds: OTP_RESEND_COOLDOWN_SECONDS });
 });
@@ -161,20 +196,21 @@ auth.post('/2fa/verify', async (c) => {
     userId = payload.sub as string; email = payload.email as string;
     if (payload.purpose !== '2fa') return c.json({ error: 'unauthorized' }, 401);
   } catch { return c.json({ error: 'unauthorized' }, 401); }
+
   const row = await tursoQuery(c.env, `SELECT * FROM otp_codes WHERE user_id = ? AND purpose = '2fa' ORDER BY created_at DESC LIMIT 1`, [userId]);
   if (row.rows.length === 0) return c.json({ error: 'code_expired' }, 400);
   const otp = row.rows[0];
-  if (new Date(otp.expires_at).getTime() < Date.now()) return c.json({ error: 'code_expired' }, 400);
+  if (new Date(otp.expires_at).getTime() < Date.now()) { await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]); return c.json({ error: 'code_expired' }, 400); }
   if (Number(otp.attempts) >= OTP_MAX_ATTEMPTS) return c.json({ error: 'too_many_attempts' }, 429);
-  if (!(await verifyOTP(String(body.code ?? ''), otp.code_hash, c.env.USER_JWT_KEY))) {
+  if (!(await verifyOTP(String(body.code ?? ''), otp.code_hash, otpKey(c.env)))) {
     await tursoExecute(c.env, `UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?`, [otp.id]);
-    return c.json({ error: 'invalid_code' }, 400);
+    return c.json({ error: 'invalid_code', attempts_remaining: OTP_MAX_ATTEMPTS - Number(otp.attempts) - 1 }, 400);
   }
   await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]);
   const user = await tursoQuery(c.env, `SELECT plan, onboarding_step FROM users WHERE id = ?`, [userId]);
-  const jwtId = generateId('jti');
-  const token = await new SignJWT({ sub: userId, email, plan: user.rows[0]?.plan ?? 'free', jti: jwtId }).setProtectedHeader({ alg: 'HS256' }).setIssuedAt().setExpirationTime('12h').sign(new TextEncoder().encode(c.env.USER_JWT_KEY));
-  await createSession(c.env, userId, jwtId);
+  const jti = generateId('jti');
+  const token = await issueUserToken(userId, email, user.rows[0]?.plan ?? 'free', c.env.USER_JWT_KEY, jti);
+  await createSession(c.env, userId, jti);
   await tursoExecute(c.env, `UPDATE users SET last_login_at = ? WHERE id = ?`, [new Date().toISOString(), userId]);
   return c.json({ success: true, token, user: { id: userId, email, plan: user.rows[0]?.plan ?? 'free', onboarding_step: user.rows[0]?.onboarding_step ?? 6 } });
 });
@@ -192,19 +228,24 @@ auth.post('/2fa/resend', async (c) => {
     if (elapsed < OTP_RESEND_COOLDOWN_SECONDS) return c.json({ error: 'cooldown_active', retry_after: Math.ceil(OTP_RESEND_COOLDOWN_SECONDS - elapsed) }, 429);
   }
   const code = generateOTP();
-  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, '2fa', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, c.env.USER_JWT_KEY), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
+  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, '2fa', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
   await sendFormSubmitEmail(c.env, email, 'Your Revercue 2FA code', { 'Verification code': code, 'Expires in': '5 minutes' });
   return c.json({ success: true, cooldown_seconds: OTP_RESEND_COOLDOWN_SECONDS });
 });
 
 auth.post('/password-reset/request', async (c) => {
+  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
+  const rl = await checkRateLimit(c.env, `pwreset:${ip}`, 3, 3600);
+  if (!rl.allowed) return c.json({ error: 'rate_limited', retry_after: rl.retryAfter }, 429);
+
   const body = await c.req.json().catch(() => ({}));
   const email = String(body.email ?? '').trim().toLowerCase();
   if (!email) return c.json({ error: 'invalid_payload' }, 400);
   const user = await tursoQuery(c.env, `SELECT id FROM users WHERE email = ?`, [email]);
   if (user.rows.length === 0) return c.json({ success: true });
+
   const code = generateOTP();
-  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'password_reset', 0, ?, ?, ?)`, [generateId('otp'), user.rows[0].id, email, await hashOTP(code, c.env.USER_JWT_KEY), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
+  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'password_reset', 0, ?, ?, ?)`, [generateId('otp'), user.rows[0].id, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
   await sendFormSubmitEmail(c.env, email, 'Reset your Revercue password', { 'Reset code': code, 'Expires in': '5 minutes', 'Note': 'If you have not activated FormSubmit yet, click the activation link first.' });
   return c.json({ success: true });
 });
@@ -215,14 +256,15 @@ auth.post('/password-reset/verify', async (c) => {
   const code = String(body.code ?? '');
   const newPassword = String(body.new_password ?? '');
   if (!email || code.length !== 6 || newPassword.length < 8) return c.json({ error: 'invalid_payload' }, 400);
+
   const row = await tursoQuery(c.env, `SELECT * FROM otp_codes WHERE email = ? AND purpose = 'password_reset' ORDER BY created_at DESC LIMIT 1`, [email]);
   if (row.rows.length === 0) return c.json({ error: 'code_expired' }, 400);
   const otp = row.rows[0];
-  if (new Date(otp.expires_at).getTime() < Date.now()) return c.json({ error: 'code_expired' }, 400);
+  if (new Date(otp.expires_at).getTime() < Date.now()) { await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]); return c.json({ error: 'code_expired' }, 400); }
   if (Number(otp.attempts) >= OTP_MAX_ATTEMPTS) return c.json({ error: 'too_many_attempts' }, 429);
-  if (!(await verifyOTP(code, otp.code_hash, c.env.USER_JWT_KEY))) {
+  if (!(await verifyOTP(code, otp.code_hash, otpKey(c.env)))) {
     await tursoExecute(c.env, `UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?`, [otp.id]);
-    return c.json({ error: 'invalid_code' }, 400);
+    return c.json({ error: 'invalid_code', attempts_remaining: OTP_MAX_ATTEMPTS - Number(otp.attempts) - 1 }, 400);
   }
   const passwordHash = await hashPassword(newPassword);
   await tursoExecute(c.env, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, [passwordHash, new Date().toISOString(), otp.user_id]);
