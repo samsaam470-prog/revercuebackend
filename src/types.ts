@@ -5,6 +5,8 @@
   ADMIN_PASS: string;
   ADMIN_JWT_KEY: string;
   USER_JWT_KEY: string;
+  OTP_HASH_KEY: string;
+  GOOGLE_CLIENT_ID?: string;
 
   TURSO_URL: string;
   TURSO_TOKEN: string;
@@ -17,3 +19,4 @@
   FORMSUBMIT_EMAIL: string;
   FRONTEND_ORIGIN: string;
 }
+
