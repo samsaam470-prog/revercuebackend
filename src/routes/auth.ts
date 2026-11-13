@@ -73,8 +73,8 @@ auth.post('/signup', async (c) => {
   await tursoExecute(c.env, `INSERT INTO formsubmit_activations (id, user_id, email, activation_sent_at) VALUES (?, ?, ?, ?)`, [generateId('fsa'), userId, email, now]);
 
   const otpText = 'Your Revercue verification code is: ' + code + '. It expires in 5 minutes.';
-  const otpHtml = '<p>Your Revercue verification code is: <strong>' + code + '</strong>. It expires in 5 minutes.</p>';
-  await sendTransactionalEmail(c.env, email, 'Your Revercue verification code', otpText, otpHtml, { 'Verification code': code, 'Expires in': '5 minutes' });
+const otpHtml = '<p>Your Revercue verification code is: <strong>' + code + '</strong>. It expires in 5 minutes.</p>';
+await sendTransactionalEmail(c.env, email, 'Your Revercue verification code', otpText, otpHtml, { 'Verification code': code, 'Expires in': '5 minutes' });
 
   return c.json({ success: true, token: await issuePreAuth(userId, email, 'signup', c.env.USER_JWT_KEY), user: { id: userId, email, plan: 'free', onboarding_step: 1, email_verified: false } }, 201);
 });
