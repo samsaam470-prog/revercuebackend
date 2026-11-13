@@ -10,14 +10,25 @@ database_id = "60b39623-1fdc-4722-967d-ed36a82623b9"
 [observability]
 enabled = true
 
-[vars]
-ADMIN_USER = "abdullah"
-B2_BUCKET_NAME = "revercue-files"
-B2_KEY_ID = "your_b2_key_id_here"
-B2_S3_ENDPOINT = "https://s3.us-east-005.backblazeb2.com"
-FRONTEND_ORIGIN = "https://revercue.pages.dev"
-TURSO_URL = "libsql://revercue-auth-revercue.aws-ap-south-1.turso.io"
-
 [triggers]
 crons = ["0 * * * *"]
 
+[vars]
+ADMIN_USER = "abdullah"
+B2_BUCKET_NAME = "revercue-files"
+B2_KEY_ID = "00525f7d4d52f090000000001"
+B2_S3_ENDPOINT = "https://s3.us-east-005.backblazeb2.com"
+COOPER_INBOX_ID = "revercue@cooperemail.com"
+FRONTEND_ORIGIN = "https://revercue.pages.dev"
+OPENMAIL_INBOX_ID = "b4b57d33-68fc-4227-8a0a-4ca47f56c4cd"
+TURSO_URL = "libsql://revercue-auth-revercue.aws-ap-south-1.turso.io"
+
+[previews.vars]
+ADMIN_USER = "abdullah"
+B2_BUCKET_NAME = "revercue-files"
+B2_KEY_ID = "00525f7d4d52f090000000001"
+B2_S3_ENDPOINT = "https://s3.us-east-005.backblazeb2.com"
+COOPER_INBOX_ID = "revercue@cooperemail.com"
+FRONTEND_ORIGIN = "https://revercue.pages.dev"
+OPENMAIL_INBOX_ID = "b4b57d33-68fc-4227-8a0a-4ca47f56c4cd"
+TURSO_URL = "libsql://revercue-auth-revercue.aws-ap-south-1.turso.io"
