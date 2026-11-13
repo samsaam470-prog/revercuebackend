@@ -17,6 +17,11 @@
   B2_S3_ENDPOINT: string;
 
   FORMSUBMIT_EMAIL: string;
+  COOPER_API_KEY: string;
+  COOPER_INBOX_ID: string;
+  OPENMAIL_API_KEY: string;
+  OPENMAIL_INBOX_ID: string;
   FRONTEND_ORIGIN: string;
 }
+
 

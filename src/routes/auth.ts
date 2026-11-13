@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import { tursoQuery, tursoExecute } from '../utils/turso';
 import { generateId } from '../utils/ids';
 import { generateOTP, hashOTP, verifyOTP, otpExpiryISO } from '../utils/otp';
-import { sendFormSubmitEmail } from '../services/email';
+import { sendFormSubmitEmail, sendTransactionalEmail } from '../services/email';
 import { checkRateLimit } from '../services/rate-limit';
 import { OTP_EXPIRY_MINUTES, OTP_MAX_ATTEMPTS, OTP_RESEND_COOLDOWN_SECONDS } from '../config/constants';
 import type { Bindings } from '../types';
@@ -72,7 +72,7 @@ auth.post('/signup', async (c) => {
 
   await tursoExecute(c.env, `INSERT INTO formsubmit_activations (id, user_id, email, activation_sent_at) VALUES (?, ?, ?, ?)`, [generateId('fsa'), userId, email, now]);
 
-  await sendFormSubmitEmail(c.env, email, 'Your Revercue verification code', { 'Verification code': code, 'Expires in': '5 minutes', 'Note': 'If you have not activated FormSubmit yet, click the activation link first. Then this code will arrive.' });
+  await sendTransactionalEmail(c.env, email, 'Your Revercue verification code', Your Revercue verification code is: . It expires in 5 minutes., <p>Your Revercue verification code is: <strong></strong>. It expires in 5 minutes.</p>, { 'Verification code': code, 'Expires in': '5 minutes' });
 
   return c.json({ success: true, token: await issuePreAuth(userId, email, 'signup', c.env.USER_JWT_KEY), user: { id: userId, email, plan: 'free', onboarding_step: 1, email_verified: false } }, 201);
 });
@@ -96,14 +96,14 @@ auth.post('/login', async (c) => {
   if (user.email_verified === 0) {
     const code = generateOTP();
     await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), user.id, user.email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-    await sendFormSubmitEmail(c.env, user.email, 'Your Revercue verification code', { 'Verification code': code, 'Expires in': '5 minutes' });
+    await sendTransactionalEmail(c.env, user.email, 'Your Revercue verification code', Your Revercue verification code is: . It expires in 5 minutes., <p>Your Revercue verification code is: <strong></strong>. It expires in 5 minutes.</p>, { 'Verification code': code, 'Expires in': '5 minutes' });
     return c.json({ success: true, requires_verification: true, token: await issuePreAuth(user.id, user.email, 'signup', c.env.USER_JWT_KEY) });
   }
 
   if (user.two_factor_enabled) {
     const code = generateOTP();
     await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, '2fa', 0, ?, ?, ?)`, [generateId('otp'), user.id, user.email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-    await sendFormSubmitEmail(c.env, user.email, 'Your Revercue 2FA code', { 'Verification code': code, 'Expires in': '5 minutes' });
+    await sendTransactionalEmail(c.env, user.email, 'Your Revercue 2FA code', Your Revercue 2FA code is: . It expires in 5 minutes., <p>Your Revercue 2FA code is: <strong></strong>. It expires in 5 minutes.</p>, { 'Verification code': code, 'Expires in': '5 minutes' });
     return c.json({ success: true, requires_2fa: true, pre_2fa_token: await issuePreAuth(user.id, user.email, '2fa', c.env.USER_JWT_KEY) });
   }
 
@@ -253,7 +253,7 @@ auth.post('/password-reset/request', async (c) => {
 
   const code = generateOTP();
   await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'password_reset', 0, ?, ?, ?)`, [generateId('otp'), user.rows[0].id, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-  await sendFormSubmitEmail(c.env, email, 'Reset your Revercue password', { 'Reset code': code, 'Expires in': '5 minutes', 'Note': 'If you have not activated FormSubmit yet, click the activation link first.' });
+  await sendTransactionalEmail(c.env, email, 'Reset your Revercue password', Your Revercue password reset code is: . It expires in 5 minutes., <p>Your Revercue password reset code is: <strong></strong>. It expires in 5 minutes.</p>, { 'Reset code': code, 'Expires in': '5 minutes' });
   return c.json({ success: true });
 });
 
@@ -305,3 +305,4 @@ auth.post('/logout', async (c) => {
 });
 
 export default auth;
+
