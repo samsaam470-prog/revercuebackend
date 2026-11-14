@@ -11,6 +11,21 @@ import type { Bindings } from '../types';
 
 const auth = new Hono<{ Bindings: Bindings }>();
 
+function otpEmailHtml(code: string, contactUrl: string): string {
+  return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body style="margin:0;padding:0;background:#0A0A0A;font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#0A0A0A;padding:48px 24px;"><tr><td align="center"><table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#141414;border:1px solid #2A2A2A;border-radius:8px;padding:40px;"><tr><td align="center" style="padding-bottom:32px;"><span style="font-family:Georgia,serif;font-size:26px;color:#FFFFFF;">[<span style="color:#C9A961;">R</span>] Revercue</span></td></tr><tr><td align="center" style="padding-bottom:8px;"><span style="font-size:12px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#C9A961;">YOUR VERIFICATION CODE</span></td></tr><tr><td align="center" style="padding-bottom:24px;"><h1 style="font-family:Georgia,serif;font-size:30px;font-weight:400;color:#FFFFFF;margin:0;line-height:1.2;">Here is your code.</h1></td></tr><tr><td align="center" style="padding-bottom:8px;"><div style="font-family:monospace;font-size:42px;font-weight:600;color:#C9A961;letter-spacing:10px;background:#0A0A0A;border:1px solid #2A2A2A;border-radius:6px;padding:20px 28px;display:inline-block;">' + code + '</div></td></tr><tr><td align="center" style="padding-bottom:32px;"><a href="#" onclick="navigator.clipboard.writeText(\'' + code + '\');return false;" style="display:inline-block;background:#C9A961;color:#0A0A0A;font-size:14px;font-weight:600;padding:10px 24px;border-radius:6px;text-decoration:none;">Copy code</a></td></tr><tr><td align="left" style="padding-bottom:20px;"><p style="font-size:15px;color:#A0A0A0;line-height:1.6;margin:0;">This code is for your Revercue account. It verifies that this email address is yours. Enter it on the page where you requested it.</p></td></tr><tr><td align="left" style="padding-bottom:20px;"><p style="font-size:15px;color:#A0A0A0;line-height:1.6;margin:0;"><strong style="color:#FFFFFF;">This code expires in 5 minutes.</strong> If it expires, you can request a new one.</p></td></tr><tr><td align="left" style="padding-bottom:20px;"><p style="font-size:15px;color:#A0A0A0;line-height:1.6;margin:0;"><strong style="color:#FFFFFF;">This code can only be used once.</strong> After it is used, it is no longer valid.</p></td></tr><tr><td align="left" style="padding-bottom:24px;"><p style="font-size:15px;color:#A0A0A0;line-height:1.6;margin:0;">If you did not request this code, check your account. Someone may be trying to access it. If you did not sign up for Revercue, ignore this email. Your account is safe.</p></td></tr><tr><td align="center" style="padding-bottom:16px;"><a href="' + contactUrl + '" style="display:inline-block;background:transparent;color:#C9A961;font-size:14px;font-weight:600;padding:10px 24px;border:1px solid #C9A961;border-radius:6px;text-decoration:none;">Contact Revercue</a></td></tr><tr><td align="left" style="padding-bottom:24px;"><p style="font-size:14px;color:#A0A0A0;line-height:1.6;margin:0;">If your email provider is blocking the code, contact the provider help team (Google, Outlook, or your provider). The code is not from them, but they can help with the delivery.</p></td></tr><tr><td align="center" style="border-top:1px solid #2A2A2A;padding-top:24px;"><p style="font-size:12px;color:#6B6B6B;margin:0;">Revercue - Your work should speak, not you.</p></td></tr></table></td></tr></table></body></html>';
+}
+
+function otpEmailText(code: string, contactUrl: string): string {
+  return 'Here is your Revercue verification code: ' + code + '\n\n' +
+    'This code is for your Revercue account. It verifies that this email address is yours. Enter it on the page where you requested it.\n\n' +
+    'This code expires in 5 minutes. If it expires, you can request a new one.\n\n' +
+    'This code can only be used once. After it is used, it is no longer valid.\n\n' +
+    'If you did not request this code, check your account. Someone may be trying to access it. If you did not sign up for Revercue, ignore this email. Your account is safe.\n\n' +
+    'If you need help, contact Revercue: ' + contactUrl + '\n\n' +
+    'If your email provider is blocking the code, contact the provider help team (Google, Outlook, or your provider). The code is not from them, but they can help with the delivery.\n\n' +
+    'Revercue - Your work should speak, not you.';
+}
+
 async function hashPassword(password: string): Promise<string> {
   return await bcrypt.hash(password, 10);
 }
@@ -37,6 +52,10 @@ async function issuePreAuth(userId: string, email: string, purpose: string, key:
 
 function otpKey(env: Bindings): string {
   return (env as any).OTP_HASH_KEY || env.USER_JWT_KEY;
+}
+
+function contactUrl(env: Bindings): string {
+  return (env as any).VITE_CONTACT_URL || 'https://revercue.pages.dev/contact';
 }
 
 async function createSession(env: Bindings, userId: string, jwtId: string, ua?: string | null, ip?: string | null, country?: string | null): Promise<void> {
@@ -72,9 +91,8 @@ auth.post('/signup', async (c) => {
 
   await tursoExecute(c.env, `INSERT INTO formsubmit_activations (id, user_id, email, activation_sent_at) VALUES (?, ?, ?, ?)`, [generateId('fsa'), userId, email, now]);
 
-  const otpText = 'Your Revercue verification code is: ' + code + '. It expires in 5 minutes.';
-const otpHtml = '<p>Your Revercue verification code is: <strong>' + code + '</strong>. It expires in 5 minutes.</p>';
-await sendTransactionalEmail(c.env, email, 'Your Revercue verification code', otpText, otpHtml, { 'Verification code': code, 'Expires in': '5 minutes' });
+  const url = contactUrl(c.env);
+  await sendTransactionalEmail(c.env, email, 'Your Revercue verification code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
 
   return c.json({ success: true, token: await issuePreAuth(userId, email, 'signup', c.env.USER_JWT_KEY), user: { id: userId, email, plan: 'free', onboarding_step: 1, email_verified: false } }, 201);
 });
@@ -98,18 +116,16 @@ auth.post('/login', async (c) => {
   if (user.email_verified === 0) {
     const code = generateOTP();
     await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), user.id, user.email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-    const otpText = 'Your Revercue verification code is: ' + code + '. It expires in 5 minutes.';
-    const otpHtml = '<p>Your Revercue verification code is: <strong>' + code + '</strong>. It expires in 5 minutes.</p>';
-    await sendTransactionalEmail(c.env, user.email, 'Your Revercue verification code', otpText, otpHtml, { 'Verification code': code, 'Expires in': '5 minutes' });
+    const url = contactUrl(c.env);
+    await sendTransactionalEmail(c.env, user.email, 'Your Revercue verification code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
     return c.json({ success: true, requires_verification: true, token: await issuePreAuth(user.id, user.email, 'signup', c.env.USER_JWT_KEY) });
   }
 
   if (user.two_factor_enabled) {
     const code = generateOTP();
     await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, '2fa', 0, ?, ?, ?)`, [generateId('otp'), user.id, user.email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-    const otpText = 'Your Revercue 2FA code is: ' + code + '. It expires in 5 minutes.';
-    const otpHtml = '<p>Your Revercue 2FA code is: <strong>' + code + '</strong>. It expires in 5 minutes.</p>';
-    await sendTransactionalEmail(c.env, user.email, 'Your Revercue 2FA code', otpText, otpHtml, { 'Verification code': code, 'Expires in': '5 minutes' });
+    const url = contactUrl(c.env);
+    await sendTransactionalEmail(c.env, user.email, 'Your Revercue 2FA code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
     return c.json({ success: true, requires_2fa: true, pre_2fa_token: await issuePreAuth(user.id, user.email, '2fa', c.env.USER_JWT_KEY) });
   }
 
@@ -197,9 +213,8 @@ auth.post('/resend-verification', async (c) => {
   }
   const code = generateOTP();
   await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-  const otpText = 'Your Revercue verification code is: ' + code + '. It expires in 5 minutes.';
-  const otpHtml = '<p>Your Revercue verification code is: <strong>' + code + '</strong>. It expires in 5 minutes.</p>';
-  await sendTransactionalEmail(c.env, email, 'Your Revercue verification code', otpText, otpHtml, { 'Verification code': code, 'Expires in': '5 minutes' });
+  const url = contactUrl(c.env);
+  await sendTransactionalEmail(c.env, email, 'Your Revercue verification code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
   return c.json({ success: true, cooldown_seconds: OTP_RESEND_COOLDOWN_SECONDS });
 });
 
@@ -244,9 +259,8 @@ auth.post('/2fa/resend', async (c) => {
   }
   const code = generateOTP();
   await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, '2fa', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-  const otpText = 'Your Revercue 2FA code is: ' + code + '. It expires in 5 minutes.';
-  const otpHtml = '<p>Your Revercue 2FA code is: <strong>' + code + '</strong>. It expires in 5 minutes.</p>';
-  await sendTransactionalEmail(c.env, email, 'Your Revercue 2FA code', otpText, otpHtml, { 'Verification code': code, 'Expires in': '5 minutes' });
+  const url = contactUrl(c.env);
+  await sendTransactionalEmail(c.env, email, 'Your Revercue 2FA code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
   return c.json({ success: true, cooldown_seconds: OTP_RESEND_COOLDOWN_SECONDS });
 });
 
@@ -263,9 +277,8 @@ auth.post('/password-reset/request', async (c) => {
 
   const code = generateOTP();
   await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'password_reset', 0, ?, ?, ?)`, [generateId('otp'), user.rows[0].id, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-  const otpText = 'Your Revercue password reset code is: ' + code + '. It expires in 5 minutes.';
-  const otpHtml = '<p>Your Revercue password reset code is: <strong>' + code + '</strong>. It expires in 5 minutes.</p>';
-  await sendTransactionalEmail(c.env, email, 'Reset your Revercue password', otpText, otpHtml, { 'Reset code': code, 'Expires in': '5 minutes' });
+  const url = contactUrl(c.env);
+  await sendTransactionalEmail(c.env, email, 'Reset your Revercue password', otpEmailText(code, url), otpEmailHtml(code, url), { 'Reset code': code, 'Expires in': '5 minutes' });
   return c.json({ success: true });
 });
 
