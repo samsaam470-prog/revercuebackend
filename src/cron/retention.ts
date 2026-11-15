@@ -34,3 +34,4 @@ export async function runRetention(env: Bindings): Promise<void> {
     await tursoExecute(env, `DELETE FROM users WHERE id = ?`, [u.id]);
   }
 }
+
