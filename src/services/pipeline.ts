@@ -1,6 +1,8 @@
 ﻿import type { Bindings } from '../types';
+import { dbFirst, dbRun } from '../utils/db';
 
 const USER_AGENT = 'Revercue/1.0 (samsaam470@gmail.com; https://revercue.pages.dev)';
+const WIKI_CACHE_HOURS = 24;
 
 export interface ExtractInput {
   client_name: string;
@@ -24,16 +26,25 @@ export interface ExtractResult {
   samples: { title: string; url: string; snippet: string }[];
 }
 
-async function safeFetch(url: string, init?: RequestInit): Promise<any | null> {
+async function safeFetch(url: string, init?: RequestInit): Promise<Response | null> {
   try {
     const res = await fetch(url, { ...init, headers: { 'User-Agent': USER_AGENT, ...(init?.headers ?? {}) } });
-    if (!res.ok) return null;
+    if (!res.ok) { console.error('FETCH_ERROR', url, res.status); return null; }
     return res;
-  } catch { return null; }
+  } catch (err: any) { console.error('FETCH_THROW', url, err.message); return null; }
 }
 
-async function fetchWikipedia(query: string): Promise<{ summary: string; image: string | null }> {
-  const url = `https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts|pageimages&exintro=1&explaintext=1&piprop=original&titles=${encodeURIComponent(query)}&origin=*`;
+// --- The Wikipedia (the 24-hour cache) ---
+async function fetchWikipedia(env: Bindings, query: string): Promise<{ summary: string; image: string | null }> {
+  const cacheKey = 'wiki:' + query.toLowerCase().trim();
+  const cached = await dbFirst<{ summary: string; image: string; cached_at: string }>(
+    env, `SELECT summary, image, cached_at FROM wiki_cache WHERE cache_key = ? LIMIT 1`, [cacheKey]
+  );
+  if (cached) {
+    const age = (Date.now() - new Date(cached.cached_at).getTime()) / 3600000;
+    if (age < WIKI_CACHE_HOURS) return { summary: cached.summary ?? '', image: cached.image ?? null };
+  }
+  const url = 'https://en.wikipedia.org/w/api.php?action=query&format=json&prop=extracts|pageimages&exintro=1&explaintext=1&piprop=original&titles=' + encodeURIComponent(query) + '&origin=*';
   const res = await safeFetch(url);
   if (!res) return { summary: '', image: null };
   const data: any = await res.json();
@@ -41,32 +52,36 @@ async function fetchWikipedia(query: string): Promise<{ summary: string; image: 
   const page: any = Object.values(pages)[0] ?? {};
   const summary = String(page.extract ?? '').slice(0, 1200);
   const image = page.original?.source ?? null;
+  await dbRun(env, `INSERT INTO wiki_cache (cache_key, summary, image, cached_at) VALUES (?, ?, ?, ?) ON CONFLICT(cache_key) DO UPDATE SET summary = excluded.summary, image = excluded.image, cached_at = excluded.cached_at`, [cacheKey, summary, image, new Date().toISOString()]);
   return { summary, image };
 }
 
+// --- The DuckDuckGo (the definition) ---
 async function fetchDuckDuckGo(query: string): Promise<string> {
-  const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1`;
+  const url = 'https://api.duckduckgo.com/?q=' + encodeURIComponent(query) + '&format=json&no_html=1';
   const res = await safeFetch(url);
   if (!res) return '';
   const data: any = await res.json();
   return String(data.AbstractText ?? data.Abstract ?? '');
 }
 
+// --- The FreeSerp (the samples) ---
 async function fetchFreeSerp(query: string): Promise<{ title: string; url: string; snippet: string }[]> {
-  const url = `https://freeserp.ai/api.php?index=web&q=${encodeURIComponent(query)}&size=10`;
+  const url = 'https://freeserp.ai/api.php?index=web&q=' + encodeURIComponent(query) + '&size=10';
   const res = await safeFetch(url);
   if (!res) return [];
   try {
     const data: any = await res.json();
-    const items = data?.results ?? data?.data ?? data?.organic ?? [];
+    const items = data?.results ?? data?.data ?? data?.organic ?? data?.items ?? [];
     return items.slice(0, 5).map((r: any) => ({
       title: String(r.title ?? r.name ?? ''),
       url: String(r.url ?? r.link ?? ''),
-      snippet: String(r.snippet ?? r.description ?? '').slice(0, 300),
+      snippet: String(r.snippet ?? r.description ?? r.text ?? '').slice(0, 300),
     }));
   } catch { return []; }
 }
 
+// --- The client website (the metadata) ---
 async function fetchClientMetadata(url: string): Promise<{ title: string; description: string; image: string | null; h2: string[] }> {
   const res = await safeFetch(url, { headers: { 'Accept': 'text/html' } });
   if (!res) return { title: '', description: '', image: null, h2: [] };
@@ -79,8 +94,22 @@ async function fetchClientMetadata(url: string): Promise<{ title: string; descri
   return { title: title.trim(), description: description.trim(), image: ogImage, h2 };
 }
 
+// --- The OpenStreetMap (the location) ---
+async function fetchNominatim(location: string): Promise<string | null> {
+  if (!location) return null;
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(location);
+  const res = await safeFetch(url);
+  if (!res) return null;
+  try {
+    const data: any = await res.json();
+    if (!Array.isArray(data) || data.length === 0) return null;
+    return String(data[0].display_name ?? '');
+  } catch { return null; }
+}
+
+// --- The Openverse (the image) ---
 async function fetchOpenverseImage(query: string): Promise<string | null> {
-  const url = `https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}&page_size=10&license_type=all-cc`;
+  const url = 'https://api.openverse.org/v1/images/?q=' + encodeURIComponent(query) + '&page_size=10&license_type=all-cc';
   const res = await safeFetch(url);
   if (!res) return null;
   try {
@@ -95,10 +124,11 @@ async function fetchOpenverseImage(query: string): Promise<string | null> {
   } catch { return null; }
 }
 
+// --- The Iconify (the icons) ---
 async function fetchIcons(services: string[]): Promise<{ service: string; icon: string }[]> {
   const results: { service: string; icon: string }[] = [];
   for (const s of services.slice(0, 5)) {
-    const url = `https://api.iconify.design/search?query=${encodeURIComponent(s)}&limit=1`;
+    const url = 'https://api.iconify.design/search?query=' + encodeURIComponent(s) + '&limit=1';
     const res = await safeFetch(url);
     if (!res) continue;
     try {
@@ -110,15 +140,18 @@ async function fetchIcons(services: string[]): Promise<{ service: string; icon: 
   return results;
 }
 
+// --- The Layer 1 (the search) ---
 export async function runLayer1(env: Bindings, input: ExtractInput): Promise<ExtractResult> {
-  const wiki = await fetchWikipedia(input.industry);
+  const wiki = await fetchWikipedia(env, input.industry);
   const ddg = await fetchDuckDuckGo(input.industry);
-  const serp = await fetchFreeSerp(`${input.client_name} ${input.industry} ${input.location ?? ''}`.trim());
+  const location = input.location ? await fetchNominatim(input.location) : null;
+  const serpQuery = input.client_name + ' ' + input.industry + ' ' + (input.location ?? '');
+  const serp = await fetchFreeSerp(serpQuery.trim());
 
   let meta = { title: '', description: '', image: null as string | null, h2: [] as string[] };
   if (input.client_website) meta = await fetchClientMetadata(input.client_website);
 
-  const imageQuery = meta.image ? input.industry : `${input.industry} ${input.service}`;
+  const imageQuery = meta.image ? input.industry : input.industry + ' ' + input.service;
   const openverseImage = meta.image ?? (await fetchOpenverseImage(imageQuery));
   const wikiImage = wiki.image;
 
@@ -136,12 +169,13 @@ export async function runLayer1(env: Bindings, input: ExtractInput): Promise<Ext
     value_prop: valueProp.slice(0, 300),
     key_points: keyPoints.slice(0, 5),
     image_url: openverseImage ?? wikiImage,
-    location: input.location ?? null,
+    location: location ?? input.location ?? null,
     wiki_attribution: wiki.summary ? 'Source: Wikipedia' : '',
     samples: serp,
   };
 }
 
+// --- The Layer 4 (the visual assets) ---
 export async function fetchVisualAssets(env: Bindings, requests: { type: string; query: string }[]): Promise<any[]> {
   const out: any[] = [];
   for (const r of requests) {
@@ -152,9 +186,8 @@ export async function fetchVisualAssets(env: Bindings, requests: { type: string;
       const icons = await fetchIcons([r.query]);
       if (icons[0]) out.push({ type: 'icon', query: r.query, icon: icons[0].icon });
     } else if (r.type === 'chart') {
-      out.push({ type: 'chart', query: r.query, url: `https://quickchart.io/chart?c=${encodeURIComponent(r.query)}` });
+      out.push({ type: 'chart', query: r.query, url: 'https://quickchart.io/chart?c=' + encodeURIComponent(r.query) });
     }
   }
   return out;
 }
-
