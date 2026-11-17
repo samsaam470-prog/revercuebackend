@@ -1,4 +1,4 @@
-﻿name = "revercue-api"
+name = "revercue-api"
 main = "src/index.ts"
 compatibility_date = "2024-11-01"
 
@@ -20,8 +20,27 @@ B2_KEY_ID = "00525f7d4d52f090000000001"
 B2_S3_ENDPOINT = "https://s3.us-east-005.backblazeb2.com"
 COOPER_INBOX_ID = "revercue@cooperemail.com"
 FRONTEND_ORIGIN = "https://revercue.pages.dev"
+ALLOWED_ORIGINS = "https://revercue.pages.dev,https://revercue.com,https://www.revercue.com"
 OPENMAIL_INBOX_ID = "b4b57d33-68fc-4227-8a0a-4ca47f56c4cd"
 TURSO_URL = "libsql://revercue-auth-revercue.aws-ap-south-1.turso.io"
+
+# AuthAction (non-secret identifiers only; the tenant is public metadata).
+AUTHACTION_ISSUER = "https://revercue.in.authaction.com"
+AUTHACTION_AUDIENCE = "revercue-api.samsaam470.workers.dev"
+
+# Transition switch: keep legacy email/password JWT auth working until the
+# frontend has fully moved to AuthAction. Set to "false" to retire it.
+ALLOW_LEGACY_AUTH = "true"
+
+# Retention policy (invoices and fully signed contracts are never auto-deleted
+# by default; see docs/DEPLOYMENT.md).
+RETENTION_WARNING_DAYS = "10"
+RETENTION_AUTO_DELETE_TYPES = "proposal,contract"
+
+# Email retry/backoff and SSE resource limits.
+EMAIL_MAX_ATTEMPTS = "5"
+SSE_KEEPALIVE_SECONDS = "15"
+SSE_MAX_SECONDS = "300"
 
 [previews.vars]
 ADMIN_USER = "abdullah"
@@ -30,5 +49,14 @@ B2_KEY_ID = "00525f7d4d52f090000000001"
 B2_S3_ENDPOINT = "https://s3.us-east-005.backblazeb2.com"
 COOPER_INBOX_ID = "revercue@cooperemail.com"
 FRONTEND_ORIGIN = "https://revercue.pages.dev"
+ALLOWED_ORIGINS = "https://revercue.pages.dev,https://revercue.com,https://www.revercue.com"
 OPENMAIL_INBOX_ID = "b4b57d33-68fc-4227-8a0a-4ca47f56c4cd"
 TURSO_URL = "libsql://revercue-auth-revercue.aws-ap-south-1.turso.io"
+AUTHACTION_ISSUER = "https://revercue.in.authaction.com"
+AUTHACTION_AUDIENCE = "revercue-api.samsaam470.workers.dev"
+ALLOW_LEGACY_AUTH = "true"
+RETENTION_WARNING_DAYS = "10"
+RETENTION_AUTO_DELETE_TYPES = "proposal,contract"
+EMAIL_MAX_ATTEMPTS = "5"
+SSE_KEEPALIVE_SECONDS = "15"
+SSE_MAX_SECONDS = "300"

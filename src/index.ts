@@ -1,4 +1,4 @@
-﻿import { Hono } from 'hono';
+import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import type { Bindings } from './types';
 import authRouter from './routes/auth';
@@ -19,18 +19,58 @@ import adminActionsRouter from './routes/admin-actions';
 import extractRouter from './routes/extract';
 import organizeRouter from './routes/organize';
 import summaryRouter from './routes/summary';
+import marketingRouter from './routes/marketing';
 import { runHourly } from './cron/summary';
+import { newReferenceCode } from './utils/http';
 
 const app = new Hono<{ Bindings: Bindings }>();
 
 app.use('*', async (c, next) => {
   const configured = (c.env.FRONTEND_ORIGIN ?? '').trim();
-  const origin = configured || '*';
-  const corsMiddleware = cors({ origin, allowHeaders: ['Content-Type', 'Authorization', 'X-Password-Session'], allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'], exposeHeaders: ['Content-Length', 'Content-Disposition'], credentials: false, maxAge: 600 });
+  const extra = (c.env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  const allowed = [configured, ...extra].filter(Boolean);
+  // Only fall back to '*' when no origin is configured at all; credentials are
+  // never enabled, so bearer tokens remain the only credential mechanism.
+  const origin = allowed.length > 0 ? allowed : '*';
+  const corsMiddleware = cors({
+    origin,
+    allowHeaders: ['Content-Type', 'Authorization', 'X-Password-Session'],
+    allowMethods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+    exposeHeaders: ['Content-Length', 'Content-Disposition'],
+    credentials: false,
+    maxAge: 600,
+  });
   return corsMiddleware(c, next);
 });
 
-app.get('/api/health', (c) => c.json({ ok: true, status: 'healthy', version: '2.0.0', timestamp: new Date().toISOString() }));
+app.use('*', async (c, next) => {
+  await next();
+  c.res.headers.set('X-Content-Type-Options', 'nosniff');
+  c.res.headers.set('Referrer-Policy', 'no-referrer');
+  c.res.headers.set('X-Frame-Options', 'DENY');
+  // API responses are user-specific; never let a shared cache keep them.
+  if (!c.res.headers.has('Cache-Control')) {
+    c.res.headers.set('Cache-Control', 'no-store');
+  }
+});
+
+app.get('/api/health', (c) =>
+  c.json({
+    ok: true,
+    status: 'healthy',
+    version: '2.1.0',
+    timestamp: new Date().toISOString(),
+    features: {
+      authaction: Boolean(c.env.AUTHACTION_ISSUER && c.env.AUTHACTION_AUDIENCE),
+      legacy_auth: (c.env.ALLOW_LEGACY_AUTH ?? 'true').toLowerCase() !== 'false',
+      email_configured: Boolean((c.env.COOPER_API_KEY && c.env.COOPER_INBOX_ID) || (c.env.OPENMAIL_API_KEY && c.env.OPENMAIL_INBOX_ID)),
+      signing_links: Boolean(c.env.SIGNING_LINK_SECRET),
+    },
+  })
+);
 
 app.route('/api/auth', authRouter);
 app.route('/api/onboarding', onboardingRouter);
@@ -50,25 +90,47 @@ app.route('/api/admin', adminActionsRouter);
 app.route('/api/extract', extractRouter);
 app.route('/api/organize', organizeRouter);
 app.route('/api/summary', summaryRouter);
+// Public marketing endpoints: /api/newsletter, /api/contact, /api/waitlist, /api/beta
+app.route('/api', marketingRouter);
 
 app.onError(async (err, c) => {
-  console.error('Unhandled error:', err);
-  const ref = `ERR-${new Date().toISOString().slice(0,10)}-${Math.random().toString(36).slice(2, 10)}`;
+  const status = (err as any)?.status;
+  const reference = newReferenceCode();
+  console.error('UNHANDLED_ERROR', reference, c.req.method, c.req.path, err);
   try {
     const { tursoExecute } = await import('./utils/turso');
     const { generateId } = await import('./utils/ids');
-    await tursoExecute(c.env, `INSERT INTO error_logs (id, reference_code, route, message, stack, created_at) VALUES (?, ?, ?, ?, ?, ?)`, [generateId('err'), ref, c.req.path, String(err.message ?? 'unknown').slice(0, 1000), String(err.stack ?? '').slice(0, 4000), new Date().toISOString()]);
-  } catch (e) { console.error('ERROR_LOG_WRITE_FAILED', e); }
-  return c.json({ error: 'internal_server_error', message: err.message || 'Something went wrong.', reference: ref }, 500);
+    await tursoExecute(
+      c.env,
+      `INSERT INTO error_logs (id, reference_code, route, message, stack, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        generateId('err'),
+        reference,
+        `${c.req.method} ${c.req.path}`,
+        String(err?.message ?? 'unknown').slice(0, 1000),
+        String(err?.stack ?? '').slice(0, 4000),
+        new Date().toISOString(),
+      ]
+    );
+  } catch (logError) {
+    console.error('ERROR_LOG_WRITE_FAILED', logError);
+  }
+  // Never leak internal error messages (SQL, provider responses) to clients.
+  return c.json(
+    {
+      error: 'internal_server_error',
+      message: 'Something went wrong. Quote the reference if you contact support.',
+      reference,
+    },
+    typeof status === 'number' && status >= 400 && status < 600 ? (status as 500) : 500
+  );
 });
 
 app.notFound((c) => c.json({ error: 'not_found', message: 'Route not found.' }, 404));
 
 export default {
   fetch: app.fetch,
-  scheduled: async (event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) => {
+  scheduled: async (_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) => {
     ctx.waitUntil(runHourly(env));
   },
 };
-
-

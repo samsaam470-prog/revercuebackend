@@ -184,3 +184,144 @@ export const SAVED_FAQ_RETENTION_MONTHS = 3;
 export const SAVED_PACKAGE_RETENTION_MONTHS = 3;
 
 export const DELETION_GRACE_DAYS = 5;
+
+// ===========================================================================
+// Contract electronic signature
+// ===========================================================================
+
+/** Canonical contract lifecycle states. Stored lowercase in D1. */
+export const CONTRACT_STATUS = {
+  DRAFT: 'draft',
+  AWAITING_FREELANCER_SIGNATURE: 'awaiting_freelancer_signature',
+  AWAITING_CLIENT_SIGNATURE: 'awaiting_client_signature',
+  FULLY_SIGNED: 'fully_signed',
+  DECLINED: 'declined',
+  VOIDED: 'voided',
+} as const;
+
+export type ContractStatus = typeof CONTRACT_STATUS[keyof typeof CONTRACT_STATUS];
+
+/** Version-level states. A version is immutable once `locked_at` is set. */
+export const CONTRACT_VERSION_STATUS = {
+  DRAFT: 'draft',
+  AWAITING_CLIENT: 'awaiting_client',
+  SIGNED: 'signed',
+  SUPERSEDED: 'superseded',
+  VOIDED: 'voided',
+} as const;
+
+/** Bump when the consent wording changes; it is stored with every signature. */
+export const SIGNING_CONSENT_VERSION = '2026-11-01';
+
+export const SIGNING_CONSENT_TEXT =
+  'I agree that typing or drawing my name constitutes my electronic signature on this contract ' +
+  'version, that I have read and accept its terms, and that this signature is legally binding ' +
+  'under the Electronic Transactions Ordinance / ESIGN Act equivalent applicable to me.';
+
+/** Max decoded size of a drawn signature image. */
+export const SIGNATURE_MAX_BYTES = 512 * 1024;
+
+/** Lifetime of an authorized signed-PDF download link. */
+export const SIGNED_PDF_LINK_TTL_SECONDS = 15 * 60;
+
+/** Lifetime of a retention delivery link emailed to the owner. */
+export const RETENTION_LINK_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+// ===========================================================================
+// Document retention lifecycle
+// ===========================================================================
+
+export type DocumentType = 'proposal' | 'contract' | 'form' | 'invoice';
+
+/**
+ * Which document types may be deleted automatically once the owner has been
+ * emailed a copy. Invoices and countersigned agreements are records with
+ * legal/accounting value, so they are archived, never deleted, by default.
+ * Operators can override with RETENTION_AUTO_DELETE_TYPES.
+ */
+export const DEFAULT_AUTO_DELETE_TYPES: DocumentType[] = ['proposal', 'contract'];
+
+/** Per-type retention policy. `deletable` is the compiled-in safety default. */
+export const RETENTION_POLICY: Record<
+  DocumentType,
+  { deletable: boolean; reason: string; requiresDelivery: boolean }
+> = {
+  proposal: {
+    deletable: true,
+    reason: 'Proposals are working documents whose PDF is sufficient after expiry.',
+    requiresDelivery: true,
+  },
+  form: {
+    deletable: false,
+    reason:
+      'A form owns client submissions, which are business records. Forms are archived with their ' +
+      'submissions and kept; an operator can opt in to deletion with RETENTION_AUTO_DELETE_TYPES.',
+    requiresDelivery: true,
+  },
+  contract: {
+    deletable: true,
+    reason:
+      'Only unsigned or declined contract drafts are deleted. Fully signed contracts are never ' +
+      'deleted automatically and are retained indefinitely unless an operator changes policy.',
+    requiresDelivery: true,
+  },
+  invoice: {
+    deletable: false,
+    reason:
+      'Invoices are accounting records. They are never auto-deleted; they are archived and kept.',
+    requiresDelivery: true,
+  },
+};
+
+export const RETENTION_WARNING_DAYS = 10;
+export const RETENTION_MAX_DELIVERY_ATTEMPTS = 5;
+/** Documents reviewed per hourly run, per type. Keeps a cron run bounded. */
+export const RETENTION_BATCH_SIZE = 50;
+
+// ===========================================================================
+// Email delivery
+// ===========================================================================
+
+export const EMAIL_MAX_ATTEMPTS = 5;
+/** Backoff schedule in minutes for failed deliveries. */
+export const EMAIL_BACKOFF_MINUTES = [1, 5, 30, 120, 360];
+export const EMAIL_BATCH_SIZE = 25;
+
+// ===========================================================================
+// Notifications / SSE
+// ===========================================================================
+
+export const SSE_DEFAULT_MAX_SECONDS = 300;
+export const SSE_DEFAULT_POLL_MS = 5000;
+export const SSE_KEEPALIVE_MS = 15000;
+export const SSE_MAX_POLL_MS = 15000;
+export const SSE_MIN_POLL_MS = 1000;
+
+// ===========================================================================
+// Uploads and validation
+// ===========================================================================
+
+export const DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+export const IMAGE_UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+export const PROOF_UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'];
+export const TEMPLATE_UPLOAD_TYPES = ['text/html', 'text/plain'];
+
+/** Hosts allowed to serve public assets through the B2 proxy. */
+export const PUBLIC_FILE_PREFIXES = ['public/'];
+
+// ===========================================================================
+// Forms enrichment pipeline
+// ===========================================================================
+
+export const FORM_PROCESSING_MAX_ATTEMPTS = 5;
+export const FORM_PROCESSING_TIMEOUT_MS = 15000;
+export const FORM_PROCESSING_BATCH_SIZE = 10;
+export const MAX_SUBMISSION_ANSWERS_BYTES = 100 * 1024;
+
+// ===========================================================================
+// Marketing / admin
+// ===========================================================================
+
+export const NEWSLETTER_EXPORT_LIMIT = 5000;
+export const ADMIN_LIST_LIMIT = 100;
+export const MARKETING_MESSAGE_MAX = 5000;

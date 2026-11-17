@@ -3,6 +3,10 @@ import { tursoQuery, tursoExecute } from '../utils/turso';
 import { dbQuery, dbRun } from '../utils/db';
 import { generateId } from '../utils/ids';
 import { adminAuthMiddleware } from '../middleware/admin-auth';
+import { logAdminAction, requireAdminUser } from '../services/admin-audit';
+import { retryDeliveryById } from '../services/email';
+import { jsonError } from '../utils/api-errors';
+import { clientIp } from '../utils/http';
 import type { Bindings } from '../types';
 
 const adminActions = new Hono<{ Bindings: Bindings }>();
@@ -27,6 +31,14 @@ adminActions.post('/waitlist/:id/mark-paid', async (c) => {
   await tursoExecute(c.env, `UPDATE users SET plan = ?, plan_expires_at = ?, updated_at = ? WHERE id = ?`, [plan, new Date(Date.now() + 30 * 86400000).toISOString(), new Date().toISOString(), userId]);
   await tursoExecute(c.env, `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at) VALUES (?, ?, ?, ?, 'USD', 'payoneer', ?, 'paid', ?, ?)`, [generateId('pay'), userId, plan, b.amount ?? 0, b.reference ?? null, new Date().toISOString(), new Date().toISOString()]);
   await tursoExecute(c.env, `UPDATE waitlist SET status = 'paid', paid_at = ? WHERE id = ?`, [new Date().toISOString(), c.req.param('id')]);
+  await logAdminAction(c.env, {
+    adminUser: requireAdminUser(c),
+    action: 'waitlist.marked_paid',
+    targetType: 'user',
+    targetId: userId,
+    metadata: { plan, amount: b.amount ?? 0 },
+    ip: clientIp(c),
+  });
   return c.json({ success: true });
 });
 
@@ -40,6 +52,13 @@ adminActions.post('/upgrade-requests/:id/confirm', async (c) => {
   await tursoExecute(c.env, `UPDATE users SET plan = ?, plan_expires_at = ?, updated_at = ? WHERE id = ?`, [plan, new Date(Date.now() + 30 * 86400000).toISOString(), now, userId]);
   await tursoExecute(c.env, `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at) VALUES (?, ?, ?, ?, 'USD', 'payoneer', ?, 'paid', ?, ?)`, [generateId('pay'), userId, plan, b.amount ?? 0, b.reference ?? null, now, now]);
   await tursoExecute(c.env, `UPDATE payment_requests SET status = 'confirmed' WHERE id = ?`, [c.req.param('id')]);
+  await logAdminAction(c.env, {
+    adminUser: requireAdminUser(c),
+    action: 'upgrade_request.confirmed',
+    targetType: 'payment_request',
+    targetId: c.req.param('id'),
+    metadata: { user_id: userId, plan, amount: b.amount ?? 0 },
+  });
   return c.json({ success: true, user_id: userId, plan });
 });
 
@@ -95,19 +114,105 @@ adminActions.post('/templates', async (c) => {
   return c.json({ success: true, id }, 201);
 });
 
+/** Administrators manage built-in templates only; a user's custom template is private. */
 adminActions.patch('/templates/:id', async (c) => {
-  const b = await c.req.json();
-  await dbRun(c.env, `UPDATE templates SET name = COALESCE(?, name), tags = COALESCE(?, tags), status = COALESCE(?, status), updated_at = ? WHERE id = ?`, [b.name ?? null, b.tags ? JSON.stringify(b.tags) : null, b.status ?? null, new Date().toISOString(), c.req.param('id')]);
+  const b = await c.req.json().catch(() => ({}));
+  const status = ['active', 'featured', 'inactive', 'draft'].includes(String(b.status ?? '')) ? b.status : null;
+  const existing = await dbQuery<any>(c.env, `SELECT id, source FROM templates WHERE id = ? LIMIT 1`, [c.req.param('id')]);
+  if (existing.length === 0) return jsonError(c, 404, 'not_found', 'Template not found.');
+  if (existing[0].source !== 'built_in') {
+    return jsonError(c, 403, 'forbidden', 'Only built-in templates can be managed by administrators.');
+  }
+  await dbRun(
+    c.env,
+    `UPDATE templates SET name = COALESCE(?, name), tags = COALESCE(?, tags), type = COALESCE(?, type), status = COALESCE(?, status), updated_at = ? WHERE id = ? AND source = 'built_in'`,
+    [
+      b.name ?? null,
+      b.tags !== undefined ? JSON.stringify(Array.isArray(b.tags) ? b.tags : String(b.tags).split(',').map((s: string) => s.trim()).filter(Boolean)) : null,
+      ['proposal', 'contract'].includes(String(b.type ?? '')) ? b.type : null,
+      status,
+      new Date().toISOString(),
+      c.req.param('id'),
+    ]
+  );
+  if (b.description !== undefined || b.category !== undefined) {
+    await dbRun(
+      c.env,
+      `INSERT INTO template_metadata (template_id, description, category, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(template_id) DO UPDATE SET description = COALESCE(excluded.description, template_metadata.description), category = COALESCE(excluded.category, template_metadata.category), updated_at = excluded.updated_at`,
+      [c.req.param('id'), b.description ?? null, b.category ?? null, new Date().toISOString()]
+    ).catch((error) => console.error('TEMPLATE_METADATA_WRITE_FAILED', error));
+  }
+  await logAdminAction(c.env, {
+    adminUser: requireAdminUser(c),
+    action: 'template.updated',
+    targetType: 'template',
+    targetId: c.req.param('id'),
+    metadata: { status: status ?? undefined },
+  });
   return c.json({ success: true });
 });
 
+adminActions.post('/templates/:id/publish', async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const status = body.featured === true ? 'featured' : 'active';
+  await dbRun(c.env, `UPDATE templates SET status = ?, updated_at = ? WHERE id = ? AND source = 'built_in'`, [
+    status,
+    new Date().toISOString(),
+    c.req.param('id'),
+  ]);
+  await logAdminAction(c.env, {
+    adminUser: requireAdminUser(c),
+    action: 'template.published',
+    targetType: 'template',
+    targetId: c.req.param('id'),
+    metadata: { status },
+  });
+  return c.json({ success: true, status });
+});
+
+adminActions.post('/templates/:id/unpublish', async (c) => {
+  await dbRun(c.env, `UPDATE templates SET status = 'inactive', updated_at = ? WHERE id = ? AND source = 'built_in'`, [
+    new Date().toISOString(),
+    c.req.param('id'),
+  ]);
+  await logAdminAction(c.env, {
+    adminUser: requireAdminUser(c),
+    action: 'template.unpublished',
+    targetType: 'template',
+    targetId: c.req.param('id'),
+  });
+  return c.json({ success: true, status: 'inactive' });
+});
+
 adminActions.delete('/templates/:id', async (c) => {
-  await dbRun(c.env, `DELETE FROM templates WHERE id = ?`, [c.req.param('id')]);
+  const existing = await dbQuery<any>(c.env, `SELECT id, source FROM templates WHERE id = ? LIMIT 1`, [c.req.param('id')]);
+  if (existing.length === 0) return jsonError(c, 404, 'not_found', 'Template not found.');
+  if (existing[0].source !== 'built_in') {
+    return jsonError(c, 403, 'forbidden', 'Only built-in templates can be deleted by administrators.');
+  }
+  await dbRun(c.env, `DELETE FROM template_metadata WHERE template_id = ?`, [c.req.param('id')]);
+  await dbRun(c.env, `DELETE FROM templates WHERE id = ? AND source = 'built_in'`, [c.req.param('id')]);
+  await logAdminAction(c.env, {
+    adminUser: requireAdminUser(c),
+    action: 'template.deleted',
+    targetType: 'template',
+    targetId: c.req.param('id'),
+  });
   return c.json({ success: true });
 });
 
 adminActions.post('/health/retry-email/:id', async (c) => {
-  return c.json({ success: true, note: 'Email retry is a no-op in this build. The FormSubmit send is already retried by the email-notify service.' });
+  const result = await retryDeliveryById(c.env, c.req.param('id'));
+  if (result.status === 'not_found') return jsonError(c, 404, 'not_found', 'Delivery not found.');
+  await logAdminAction(c.env, {
+    adminUser: requireAdminUser(c),
+    action: 'email.retried',
+    targetType: 'email_delivery',
+    targetId: c.req.param('id'),
+    metadata: { ok: result.ok, status: result.status },
+  });
+  return c.json({ success: result.ok, status: result.status, error: result.error ?? null });
 });
 
 adminActions.post('/health/run-cron/:job', async (c) => {

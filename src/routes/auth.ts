@@ -7,6 +7,18 @@ import { generateOTP, hashOTP, verifyOTP, otpExpiryISO } from '../utils/otp';
 import { sendTransactionalEmail } from '../services/email';
 import { checkRateLimit } from '../services/rate-limit';
 import { OTP_EXPIRY_MINUTES, OTP_MAX_ATTEMPTS, OTP_RESEND_COOLDOWN_SECONDS } from '../config/constants';
+import { userAuthMiddleware, getAuth } from '../middleware/user-auth';
+import { verifyAccessToken, AuthActionTokenError, AuthActionConfigError, isAuthActionConfigured } from '../services/authaction';
+import {
+  confirmLinkChallenge,
+  findIdentity,
+  findUserByEmail,
+  getUserById,
+  startLinkChallenge,
+} from '../services/identity';
+import { linkCodeEmail } from '../services/email-templates';
+import { jsonError } from '../utils/api-errors';
+import { clientIp } from '../utils/http';
 import type { Bindings } from '../types';
 
 const auth = new Hono<{ Bindings: Bindings }>();
@@ -88,8 +100,6 @@ auth.post('/signup', async (c) => {
   const code = generateOTP();
   const codeHash = await hashOTP(code, otpKey(c.env));
   await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, codeHash, otpExpiryISO(OTP_EXPIRY_MINUTES), now, now]);
-
-  await tursoExecute(c.env, `INSERT INTO formsubmit_activations (id, user_id, email, activation_sent_at) VALUES (?, ?, ?, ?)`, [generateId('fsa'), userId, email, now]);
 
   const url = contactUrl(c.env);
   await sendTransactionalEmail(c.env, email, 'Your Revercue verification code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
@@ -305,16 +315,167 @@ auth.post('/password-reset/verify', async (c) => {
   return c.json({ success: true });
 });
 
-auth.get('/me', async (c) => {
+/**
+ * Current user profile + subscription. Accepts an AuthAction access token
+ * (preferred) or a legacy Revercue session token during the transition.
+ * If the AuthAction identity is not linked yet the shared middleware answers
+ * 401 `account_link_required`, which drives the linking flow below.
+ */
+auth.get('/me', userAuthMiddleware, async (c) => {
+  const authCtx = getAuth(c);
+  const result = await tursoQuery(c.env, `SELECT * FROM users WHERE id = ? LIMIT 1`, [authCtx.userId]);
+  if (result.rows.length === 0) return c.json({ error: 'unauthorized' }, 401);
+  const u = result.rows[0];
+  const identity = authCtx.subject ? await findIdentity(c.env, authCtx.subject).catch(() => null) : null;
+  return c.json({
+    user: {
+      id: u.id,
+      email: u.email,
+      name: u.name,
+      plan: u.plan,
+      plan_expires_at: u.plan_expires_at ?? null,
+      onboarding_step: u.onboarding_step,
+      tutorial_completed: u.tutorial_completed,
+      tutorial_skipped: u.tutorial_skipped ?? null,
+      email_verified: u.email_verified,
+      two_factor_enabled: u.two_factor_enabled,
+      account_type: u.account_type ?? null,
+      business_name: u.business_name ?? null,
+      deletion_requested_at: u.deletion_requested_at ?? null,
+      auth: {
+        provider: authCtx.via === 'authaction' ? 'authaction' : 'legacy',
+        linked: authCtx.via === 'authaction' ? Boolean(identity) : Boolean(identity),
+      },
+    },
+  });
+});
+
+/**
+ * Account linking step 1: email a one-time code to the address being linked.
+ * A matching email in Revercue is never enough on its own — the code proves
+ * control of the mailbox, so an attacker cannot merge into an existing account
+ * by registering the same address at AuthAction.
+ */
+auth.post('/link/start', async (c) => {
+  if (!isAuthActionConfigured(c.env)) {
+    return jsonError(c, 500, 'config_error', 'AuthAction is not configured on this deployment.');
+  }
   const header = c.req.header('Authorization') ?? '';
-  if (!header.startsWith('Bearer ')) return c.json({ error: 'unauthorized' }, 401);
+  if (!header.startsWith('Bearer ')) return jsonError(c, 401, 'unauthorized', 'Missing bearer token.');
+
+  let identity;
   try {
-    const { payload } = await jwtVerify(header.slice(7).trim(), new TextEncoder().encode(c.env.USER_JWT_KEY));
-    const result = await tursoQuery(c.env, `SELECT * FROM users WHERE id = ?`, [payload.sub as string]);
-    if (result.rows.length === 0) return c.json({ error: 'unauthorized' }, 401);
-    const u = result.rows[0];
-    return c.json({ user: { id: u.id, email: u.email, name: u.name, plan: u.plan, onboarding_step: u.onboarding_step, formsubmit_activated: u.formsubmit_activated, tutorial_completed: u.tutorial_completed, email_verified: u.email_verified, two_factor_enabled: u.two_factor_enabled } });
-  } catch { return c.json({ error: 'unauthorized' }, 401); }
+    identity = await verifyAccessToken(c.env, header.slice(7).trim());
+  } catch (error) {
+    if (error instanceof AuthActionTokenError) {
+      return jsonError(c, 401, 'unauthorized', error.message, { reason: error.code });
+    }
+    if (error instanceof AuthActionConfigError) {
+      console.error('AUTHACTION_CONFIG_ERROR', error.message);
+      return jsonError(c, 500, 'config_error', 'Authentication is temporarily unavailable.');
+    }
+    throw error;
+  }
+
+  const existing = await findIdentity(c.env, identity.subject);
+  if (existing) {
+    return jsonError(c, 409, 'already_linked', 'This sign-in is already linked to a Revercue account.');
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const requestedEmail = String(body.email ?? identity.email ?? '').trim().toLowerCase();
+  if (!requestedEmail) {
+    return jsonError(c, 400, 'invalid_payload', 'An email address is required to link the account.');
+  }
+  if (identity.email && requestedEmail !== identity.email) {
+    return jsonError(
+      c,
+      400,
+      'email_mismatch',
+      'The email must match the verified address on your AuthAction account.'
+    );
+  }
+  if (identity.email && !identity.emailVerified) {
+    return jsonError(
+      c,
+      403,
+      'email_not_verified',
+      'Verify your email with AuthAction before linking it to a Revercue account.'
+    );
+  }
+
+  const challenge = await startLinkChallenge(c.env, {
+    subject: identity.subject,
+    email: requestedEmail,
+    ip: clientIp(c),
+  });
+  if (!challenge.ok || !challenge.code) {
+    return jsonError(c, 429, 'rate_limited', 'A code was sent recently. Try again shortly.', {
+      retry_after: challenge.retryAfter ?? 60,
+    });
+  }
+
+  const rendered = linkCodeEmail({ code: challenge.code, email: requestedEmail });
+  const sent = await sendTransactionalEmail(c.env, requestedEmail, rendered.subject, rendered.text, rendered.html);
+  const masked = requestedEmail.replace(/^(.)(.*)(@.*)$/, (_m, first, middle, domain) => `${first}${'*'.repeat(Math.min(String(middle).length, 4))}${domain}`);
+  return c.json({
+    success: true,
+    email: masked,
+    expires_in: 600,
+    email_sent: sent,
+    message: sent
+      ? 'A confirmation code was sent to that address.'
+      : 'The code could not be emailed right now. Try again shortly.',
+  });
+});
+
+/**
+ * Account linking step 2: verify the code and create/link the Revercue user.
+ * A brand new address creates a new Revercue account; an existing address is
+ * linked only after the code proves ownership.
+ */
+auth.post('/link/confirm', async (c) => {
+  if (!isAuthActionConfigured(c.env)) {
+    return jsonError(c, 500, 'config_error', 'AuthAction is not configured on this deployment.');
+  }
+  const header = c.req.header('Authorization') ?? '';
+  if (!header.startsWith('Bearer ')) return jsonError(c, 401, 'unauthorized', 'Missing bearer token.');
+
+  let identity;
+  try {
+    identity = await verifyAccessToken(c.env, header.slice(7).trim());
+  } catch (error) {
+    if (error instanceof AuthActionTokenError) {
+      return jsonError(c, 401, 'unauthorized', error.message, { reason: error.code });
+    }
+    throw error;
+  }
+
+  const body = await c.req.json().catch(() => ({}));
+  const email = String(body.email ?? identity.email ?? '').trim().toLowerCase();
+  const code = String(body.code ?? '').trim();
+  if (!email || !/^\d{6}$/.test(code)) {
+    return jsonError(c, 400, 'invalid_payload', 'An email address and the 6 digit code are required.');
+  }
+
+  const result = await confirmLinkChallenge(c.env, { subject: identity.subject, email, code });
+  if (!result.ok) {
+    const map: Record<string, [400 | 429, string, string]> = {
+      no_code: [400, 'code_expired', 'Request a new code.'],
+      expired: [400, 'code_expired', 'That code expired. Request a new one.'],
+      too_many_attempts: [429, 'too_many_attempts', 'Too many attempts. Request a new code later.'],
+      invalid_code: [400, 'invalid_code', 'That code is not correct.'],
+    };
+    const [status, error, message] = map[result.reason] ?? [400, 'invalid_code', 'That code is not correct.'];
+    return jsonError(c, status, error, message);
+  }
+
+  const user = await getUserById(c.env, result.userId);
+  return c.json({
+    success: true,
+    created: result.created,
+    user: user ? { id: user.id, email: user.email, plan: user.plan } : null,
+  });
 });
 
 auth.post('/logout', async (c) => {
