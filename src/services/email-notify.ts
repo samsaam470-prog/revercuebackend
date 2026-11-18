@@ -10,6 +10,8 @@ export interface EmailEventInput {
   clientName?: string | null;
   documentTitle?: string | null;
   extra?: Record<string, string>;
+  /** Stable per-notification key so cron retries cannot duplicate the email. */
+  idempotencyKey?: string;
 }
 
 const EVENT_SUBJECTS: Record<string, string> = {
@@ -78,6 +80,8 @@ export async function maybeSendEmail(env: Bindings, input: EmailEventInput): Pro
       text: lines.join('\n'),
       kind: 'notification',
       userId: input.userId,
+      idempotencyKey: input.idempotencyKey ?? `notification:${input.userId}:${input.eventType}:${Date.now()}`,
+      retryable: true,
     });
     return result.ok;
   } catch (error) {

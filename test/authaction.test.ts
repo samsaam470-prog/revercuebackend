@@ -9,7 +9,7 @@ import type { Bindings } from '../src/types';
 
 const ISSUER = 'https://revercue.in.authaction.com';
 const AUDIENCE = 'revercue-api.samsaam470.workers.dev';
-const CLIENT_ID = '6afa55be765d68ab52b7acee';
+const CLIENT_ID = 'OXJC1YmE3BwYU03xKfrMblC2F8hr9AC4';
 const JWKS_URL = `${ISSUER}/.well-known/jwks.json`;
 
 let privateKey: any;

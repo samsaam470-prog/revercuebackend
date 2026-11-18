@@ -27,6 +27,9 @@ TURSO_URL = "libsql://revercue-auth-revercue.aws-ap-south-1.turso.io"
 # AuthAction (non-secret identifiers only; the tenant is public metadata).
 AUTHACTION_ISSUER = "https://revercue.in.authaction.com"
 AUTHACTION_AUDIENCE = "revercue-api.samsaam470.workers.dev"
+# Public SPA client identifier. Used only to reject ID tokens; never accepted
+# in place of the API audience above.
+AUTHACTION_CLIENT_ID = "OXJC1YmE3BwYU03xKfrMblC2F8hr9AC4"
 
 # Transition switch: keep legacy email/password JWT auth working until the
 # frontend has fully moved to AuthAction. Set to "false" to retire it.
@@ -54,6 +57,7 @@ OPENMAIL_INBOX_ID = "b4b57d33-68fc-4227-8a0a-4ca47f56c4cd"
 TURSO_URL = "libsql://revercue-auth-revercue.aws-ap-south-1.turso.io"
 AUTHACTION_ISSUER = "https://revercue.in.authaction.com"
 AUTHACTION_AUDIENCE = "revercue-api.samsaam470.workers.dev"
+AUTHACTION_CLIENT_ID = "OXJC1YmE3BwYU03xKfrMblC2F8hr9AC4"
 ALLOW_LEGACY_AUTH = "true"
 RETENTION_WARNING_DAYS = "10"
 RETENTION_AUTO_DELETE_TYPES = "proposal,contract"

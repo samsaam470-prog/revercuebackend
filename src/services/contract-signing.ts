@@ -533,6 +533,8 @@ export async function publishSignedContract(
       documentType: 'contract',
       documentId: contract.id,
       idempotencyKey: `contract-awaiting:${contract.id}:${version.id}`,
+      // The sign URL is permanent for this version, so a cron retry is safe.
+      retryable: true,
     }).catch((error) => console.error('CONTRACT_INVITE_EMAIL_FAILED', error));
   }
 
@@ -647,6 +649,8 @@ export async function signAsClient(
     title: `${contract.title} is fully signed`,
     documentTitle: String(contract.title ?? ''),
     clientName: name,
+    // The richer signed-PDF email below is the single email for this event.
+    sendEmail: false,
   });
 
   if (pdf) {
@@ -677,6 +681,8 @@ export async function signAsClient(
         documentType: 'contract',
         documentId: contract.id,
         idempotencyKey: `contract-signed:${contract.id}:${version.id}`,
+        // Not cron-retryable: the signed-PDF link is valid for 15 minutes only.
+        retryable: false,
       }).catch((error) => console.error('CONTRACT_SIGNED_EMAIL_FAILED', error));
     }
   }

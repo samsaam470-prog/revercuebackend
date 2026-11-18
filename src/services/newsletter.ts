@@ -4,9 +4,12 @@ import type { Bindings } from '../types';
 /**
  * Newsletter subscription state machine.
  *
- * Double opt-in: a subscription is `pending` until the address confirms, which
- * also prevents using this endpoint to sign someone else up silently. The
- * confirm/unsubscribe links are HMAC tokens, so they cannot be forged and no
+ * New website subscriptions are active immediately (single opt-in). The
+ * `confirm` action and its HMAC token remain supported only so confirmation
+ * links already emailed by older releases keep working; no new confirmation
+ * email or token is generated for a subscription.
+ *
+ * Unsubscribe links are HMAC tokens, so they cannot be forged and no
  * per-subscriber token column is required.
  */
 
@@ -27,13 +30,15 @@ export function nextStatus(
 ): SubscriberStatus {
   if (action === 'unsubscribe') return 'unsubscribed';
   if (action === 'confirm') return 'active';
-  if (current === 'active') return 'active';
-  return 'pending';
+  // Single opt-in: a deliberate subscribe (including a resubscribe after an
+  // unsubscribe) is active immediately. The current status is intentionally
+  // ignored; it is only retained in the signature for compatibility.
+  return 'active';
 }
 
 /** True when the request should not create a second row. */
 export function isDuplicateSubscription(current: SubscriberStatus | null): boolean {
-  return current === 'active' || current === 'pending';
+  return current === 'active' || current === 'pending' || current === 'unsubscribed';
 }
 
 export async function createNewsletterToken(

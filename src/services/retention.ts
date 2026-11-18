@@ -264,6 +264,8 @@ async function sendWarning(env: Bindings, candidate: RetentionCandidate, daysRem
     title: `${candidate.title} is deleted in ${daysRemaining} days`,
     body: `Expires ${candidate.expiryDate.slice(0, 10)}. Open Revercue to keep it.`,
     documentTitle: candidate.title,
+    // The specific warning email below is the single email for this event.
+    sendEmail: false,
   }).catch((error) => console.error('RETENTION_NOTIFICATION_FAILED', error));
 
   if (!email) return false;
@@ -284,6 +286,8 @@ async function sendWarning(env: Bindings, candidate: RetentionCandidate, daysRem
     documentType: candidate.documentType,
     documentId: candidate.documentId,
     idempotencyKey: `retention-warning:${warningIdempotencyKey(candidate.documentType, candidate.documentId, candidate.expiryDate, daysRemaining)}`,
+    // The dashboard keep link is permanent; retry provider outages by cron.
+    retryable: true,
   });
   return result.ok;
 }

@@ -12,10 +12,15 @@ import type { Bindings } from '../src/types';
 const env = { SIGNING_LINK_SECRET: 'unit-test-secret' } as unknown as Bindings;
 
 describe('newsletter subscription state machine', () => {
-  it('double opt-in: subscribe is pending until confirmed', () => {
-    expect(nextStatus(null, 'subscribe')).toBe('pending');
-    expect(nextStatus(null, 'confirm')).toBe('active');
+  it('single opt-in: subscribe is active immediately', () => {
+    expect(nextStatus(null, 'subscribe')).toBe('active');
+    expect(nextStatus('pending', 'subscribe')).toBe('active');
     expect(nextStatus('active', 'subscribe')).toBe('active');
+    // A deliberate resubscription is the only way an unsubscribe is reversed.
+    expect(nextStatus('unsubscribed', 'subscribe')).toBe('active');
+  });
+
+  it('keeps the legacy confirm action active', () => {
     expect(nextStatus('pending', 'confirm')).toBe('active');
   });
 
@@ -24,10 +29,10 @@ describe('newsletter subscription state machine', () => {
     expect(nextStatus('pending', 'unsubscribe')).toBe('unsubscribed');
   });
 
-  it('treats pending and active as duplicates', () => {
+  it('treats every existing row as a duplicate row', () => {
     expect(isDuplicateSubscription('pending')).toBe(true);
     expect(isDuplicateSubscription('active')).toBe(true);
-    expect(isDuplicateSubscription('unsubscribed')).toBe(false);
+    expect(isDuplicateSubscription('unsubscribed')).toBe(true);
     expect(isDuplicateSubscription(null)).toBe(false);
   });
 

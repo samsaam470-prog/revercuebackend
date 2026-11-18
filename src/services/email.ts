@@ -24,7 +24,6 @@ export type EmailKind =
   | 'document_delivery'
   | 'retention_warning'
   | 'admin_lead'
-  | 'newsletter_confirm'
   | 'notification';
 
 export interface EmailAttachment {
@@ -58,11 +57,23 @@ export interface EmailResult {
   error?: string;
 }
 
-interface ProviderOutcome {
+export interface ProviderOutcome {
   ok: boolean;
   provider: string;
   messageId?: string;
   error?: string;
+}
+
+export type EmailProvider = (env: Bindings, message: EmailMessage) => Promise<ProviderOutcome>;
+
+export interface FallbackResult {
+  ok: boolean;
+  provider?: string;
+  messageId?: string;
+  /** Last provider error, retained for the delivery record. */
+  error?: string;
+  /** Every provider error, in attempt order. */
+  errors: string[];
 }
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
@@ -105,7 +116,9 @@ async function sendViaCooper(env: Bindings, message: EmailMessage): Promise<Prov
     );
     const body = await response.text();
     if (!response.ok) {
-      console.error('COOPER_SEND_FAILED', response.status, body.slice(0, 500));
+      // Provider error bodies can echo the message or recipient; log only the
+      // status code so email content never reaches application logs.
+      console.error('COOPER_SEND_FAILED', response.status);
       return { ok: false, provider: 'cooper', error: `http_${response.status}` };
     }
     let messageId: string | undefined;
@@ -117,7 +130,7 @@ async function sendViaCooper(env: Bindings, message: EmailMessage): Promise<Prov
     }
     return { ok: true, provider: 'cooper', messageId };
   } catch (error: any) {
-    console.error('COOPER_SEND_THROW', error?.message ?? error);
+    console.error('COOPER_SEND_THROW', error?.name ?? 'unknown');
     return { ok: false, provider: 'cooper', error: 'network_error' };
   }
 }
@@ -134,7 +147,7 @@ async function sendViaOpenMail(env: Bindings, message: EmailMessage): Promise<Pr
         headers: {
           Authorization: `Bearer ${env.OPENMAIL_API_KEY}`,
           'Content-Type': 'application/json',
-          'Idempotency-Key': message.idempotencyKey ?? crypto.randomUUID(),
+          ...(message.idempotencyKey ? { 'Idempotency-Key': message.idempotencyKey } : {}),
         },
         body: JSON.stringify({
           from: fromAddress(env),
@@ -148,7 +161,7 @@ async function sendViaOpenMail(env: Bindings, message: EmailMessage): Promise<Pr
     );
     const body = await response.text();
     if (!response.ok) {
-      console.error('OPENMAIL_SEND_FAILED', response.status, body.slice(0, 500));
+      console.error('OPENMAIL_SEND_FAILED', response.status);
       return { ok: false, provider: 'openmail', error: `http_${response.status}` };
     }
     let messageId: string | undefined;
@@ -160,9 +173,54 @@ async function sendViaOpenMail(env: Bindings, message: EmailMessage): Promise<Pr
     }
     return { ok: true, provider: 'openmail', messageId };
   } catch (error: any) {
-    console.error('OPENMAIL_SEND_THROW', error?.message ?? error);
+    console.error('OPENMAIL_SEND_THROW', error?.name ?? 'unknown');
     return { ok: false, provider: 'openmail', error: 'network_error' };
   }
+}
+
+/**
+ * Cooper is the primary provider; OpenMail is attempted only after Cooper
+ * fails. A successful provider short-circuits the chain, so the same message
+ * is never deliberately delivered twice in one attempt.
+ */
+export async function deliverWithFallback(
+  env: Bindings,
+  message: EmailMessage,
+  providers: [EmailProvider, EmailProvider] = [sendViaCooper, sendViaOpenMail]
+): Promise<FallbackResult> {
+  const errors: string[] = [];
+  for (const provider of providers) {
+    const outcome = await provider(env, message);
+    if (outcome.ok) {
+      return { ok: true, provider: outcome.provider, messageId: outcome.messageId, errors };
+    }
+    errors.push(outcome.error ?? 'send_failed');
+  }
+  return {
+    ok: false,
+    error: errors[errors.length - 1] ?? 'no_provider',
+    errors,
+  };
+}
+
+export interface RetryDecision {
+  retry: boolean;
+  status: 'failed' | 'abandoned';
+  nextAttemptAt: Date | null;
+}
+
+/** Pure policy used by initial sends, the cron worker and manual retries. */
+export function retryDecision(
+  attempts: number,
+  retryable: boolean,
+  maxAttempts: number = EMAIL_MAX_ATTEMPTS
+): RetryDecision {
+  const retry = Boolean(retryable) && shouldRetry(attempts, maxAttempts);
+  return {
+    retry,
+    status: retry || attempts < maxAttempts ? 'failed' : 'abandoned',
+    nextAttemptAt: retry ? nextAttemptAt(attempts) : null,
+  };
 }
 
 async function findDeliveryByKey(env: Bindings, key: string) {
@@ -183,18 +241,25 @@ export async function sendEmail(env: Bindings, message: EmailMessage): Promise<E
   const kind: EmailKind = message.kind ?? 'transactional';
   const key = message.idempotencyKey ?? null;
 
-  if (key) {
-    const existing = await findDeliveryByKey(env, key);
-    if (existing && existing.status === 'sent') {
-      return { ok: true, status: 'deduped', deliveryId: String(existing.id) };
-    }
+  const existing = key ? await findDeliveryByKey(env, key) : null;
+  if (existing && existing.status === 'sent') {
+    return { ok: true, status: 'deduped', deliveryId: String(existing.id) };
+  }
+  if (existing && existing.status === 'abandoned') {
+    // The retry budget is exhausted and the payload is retained for an explicit
+    // administrator retry; an automatic resend would restart the loop.
+    return {
+      ok: false,
+      status: 'failed',
+      deliveryId: String(existing.id),
+      error: 'delivery_abandoned',
+    };
   }
 
   const now = new Date().toISOString();
   let deliveryId: string;
   let attempts = 1;
 
-  const existing = key ? await findDeliveryByKey(env, key) : null;
   if (existing) {
     deliveryId = String(existing.id);
     attempts = Number(existing.attempts ?? 0) + 1;
@@ -205,53 +270,72 @@ export async function sendEmail(env: Bindings, message: EmailMessage): Promise<E
     );
   } else {
     deliveryId = generateId('eml');
-    await tursoExecute(
-      env,
-      `INSERT INTO email_deliveries (id, user_id, to_email, kind, subject, provider, status, attempts, last_error, provider_message_id, idempotency_key, retryable, payload, document_type, document_id, created_at, updated_at, sent_at, next_attempt_at)
-       VALUES (?, ?, ?, ?, ?, NULL, 'sending', 1, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
-      [
-        deliveryId,
-        message.userId ?? null,
-        to,
-        kind,
-        message.subject.slice(0, 300),
-        key,
-        message.retryable ? 1 : 0,
-        message.retryable ? JSON.stringify(message) : null,
-        message.documentType ?? null,
-        message.documentId ?? null,
-        now,
-        now,
-      ]
-    );
-  }
-
-  const attemptsList = [sendViaCooper, sendViaOpenMail];
-  let lastError = 'no_provider';
-  for (const provider of attemptsList) {
-    const outcome = await provider(env, message);
-    if (outcome.ok) {
+    try {
       await tursoExecute(
         env,
-        `UPDATE email_deliveries SET status = 'sent', provider = ?, provider_message_id = ?, last_error = NULL, sent_at = ?, updated_at = ?, next_attempt_at = NULL WHERE id = ?`,
-        [outcome.provider, outcome.messageId ?? null, new Date().toISOString(), new Date().toISOString(), deliveryId]
+        `INSERT INTO email_deliveries (id, user_id, to_email, kind, subject, provider, status, attempts, last_error, provider_message_id, idempotency_key, retryable, payload, document_type, document_id, created_at, updated_at, sent_at, next_attempt_at)
+         VALUES (?, ?, ?, ?, ?, NULL, 'sending', 1, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+        [
+          deliveryId,
+          message.userId ?? null,
+          to,
+          kind,
+          message.subject.slice(0, 300),
+          key,
+          message.retryable ? 1 : 0,
+          message.retryable ? JSON.stringify(message) : null,
+          message.documentType ?? null,
+          message.documentId ?? null,
+          now,
+          now,
+        ]
       );
-      return { ok: true, status: 'sent', provider: outcome.provider, deliveryId };
+    } catch (error) {
+      // Two callers can race on the same idempotency key. Reuse the winner's
+      // delivery row instead of failing or sending a second copy.
+      const raced = key ? await findDeliveryByKey(env, key) : null;
+      if (!raced) throw error;
+      if (raced.status === 'sent') {
+        return { ok: true, status: 'deduped', deliveryId: String(raced.id) };
+      }
+      deliveryId = String(raced.id);
+      attempts = Number(raced.attempts ?? 0) + 1;
+      await tursoExecute(
+        env,
+        `UPDATE email_deliveries SET status = 'sending', attempts = ?, updated_at = ? WHERE id = ?`,
+        [attempts, now, deliveryId]
+      );
     }
-    lastError = outcome.error ?? lastError;
   }
 
-  const retry = shouldRetry(attempts, EMAIL_MAX_ATTEMPTS) && Boolean(message.retryable);
-  const scheduled = retry ? nextAttemptAt(attempts).toISOString() : null;
+  // A stable provider idempotency key protects against retries and concurrent
+  // callers even when the caller did not supply one.
+  const providerMessage: EmailMessage = {
+    ...message,
+    idempotencyKey: key ?? deliveryId,
+  };
+  const outcome = await deliverWithFallback(env, providerMessage);
+  if (outcome.ok) {
+    await tursoExecute(
+      env,
+      `UPDATE email_deliveries SET status = 'sent', provider = ?, provider_message_id = ?, last_error = NULL, sent_at = ?, updated_at = ?, next_attempt_at = NULL WHERE id = ?`,
+      [outcome.provider ?? null, outcome.messageId ?? null, new Date().toISOString(), new Date().toISOString(), deliveryId]
+    );
+    return { ok: true, status: 'sent', provider: outcome.provider, deliveryId };
+  }
+
+  const decision = retryDecision(attempts, Boolean(message.retryable));
+  const lastError = outcome.error ?? 'no_provider';
   await tursoExecute(
     env,
     `UPDATE email_deliveries SET status = ?, last_error = ?, updated_at = ?, next_attempt_at = ? WHERE id = ?`,
-    [retry ? 'failed' : attempts >= EMAIL_MAX_ATTEMPTS ? 'abandoned' : 'failed', lastError, new Date().toISOString(), scheduled, deliveryId]
+    [decision.status, lastError, new Date().toISOString(), decision.nextAttemptAt?.toISOString() ?? null, deliveryId]
   );
   console.error('EMAIL_DELIVERY_FAILED', kind, lastError);
+  const allNotConfigured = outcome.errors.length > 0 && outcome.errors.every((error) => error === 'not_configured');
   return {
     ok: false,
-    status: lastError === 'not_configured' ? 'config_error' : 'failed',
+    status: allNotConfigured ? 'config_error' : 'failed',
     deliveryId,
     error: lastError,
   };
@@ -307,9 +391,10 @@ export async function retryFailedDeliveries(
     }
 
     const attempts = Number(row.attempts ?? 0);
-    const outcome = (await sendViaCooper(env, message)).ok
-      ? { ok: true as const, provider: 'cooper' }
-      : await sendViaOpenMail(env, message);
+    const outcome = await deliverWithFallback(env, {
+      ...message,
+      idempotencyKey: message.idempotencyKey ?? String(row.id),
+    });
 
     if (outcome.ok) {
       await tursoExecute(
@@ -322,20 +407,20 @@ export async function retryFailedDeliveries(
     }
 
     const nextAttempts = attempts + 1;
-    const canRetry = shouldRetry(nextAttempts, EMAIL_MAX_ATTEMPTS);
+    const decision = retryDecision(nextAttempts, true);
     await tursoExecute(
       env,
       `UPDATE email_deliveries SET status = ?, attempts = ?, last_error = ?, updated_at = ?, next_attempt_at = ? WHERE id = ?`,
       [
-        canRetry ? 'failed' : 'abandoned',
+        decision.status,
         nextAttempts,
         outcome.error ?? 'send_failed',
         new Date().toISOString(),
-        canRetry ? nextAttemptAt(nextAttempts).toISOString() : null,
+        decision.nextAttemptAt?.toISOString() ?? null,
         row.id,
       ]
     );
-    if (canRetry) failed += 1;
+    if (decision.retry) failed += 1;
     else abandoned += 1;
   }
 
@@ -360,34 +445,35 @@ export async function retryDeliveryById(
     return { ok: false, status: 'not_retryable', error: 'corrupt_payload' };
   }
 
-  const outcome = (await sendViaCooper(env, message)).ok
-    ? { ok: true as const, provider: 'cooper' }
-    : await sendViaOpenMail(env, message);
+  const outcome = await deliverWithFallback(env, {
+    ...message,
+    idempotencyKey: message.idempotencyKey ?? deliveryId,
+  });
   const attempts = Number(delivery.attempts ?? 0) + 1;
 
   if (outcome.ok) {
     await tursoExecute(
       env,
       `UPDATE email_deliveries SET status = 'sent', provider = ?, attempts = ?, sent_at = ?, updated_at = ?, next_attempt_at = NULL, last_error = NULL WHERE id = ?`,
-      [outcome.provider, attempts, new Date().toISOString(), new Date().toISOString(), deliveryId]
+      [outcome.provider ?? null, attempts, new Date().toISOString(), new Date().toISOString(), deliveryId]
     );
     return { ok: true, status: 'sent' };
   }
 
-  const canRetry = shouldRetry(attempts, EMAIL_MAX_ATTEMPTS);
+  const decision = retryDecision(attempts, true);
   await tursoExecute(
     env,
     `UPDATE email_deliveries SET status = ?, attempts = ?, last_error = ?, updated_at = ?, next_attempt_at = ? WHERE id = ?`,
     [
-      canRetry ? 'failed' : 'abandoned',
+      decision.status,
       attempts,
       outcome.error ?? 'send_failed',
       new Date().toISOString(),
-      canRetry ? nextAttemptAt(attempts).toISOString() : null,
+      decision.nextAttemptAt?.toISOString() ?? null,
       deliveryId,
     ]
   );
-  return { ok: false, status: canRetry ? 'failed' : 'abandoned', error: outcome.error };
+  return { ok: false, status: decision.status, error: outcome.error };
 }
 
 /** Removes delivered/failed payloads once they are no longer needed. */

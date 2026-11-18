@@ -161,7 +161,7 @@ export function formSubmissionEmail(input: {
 }
 
 export function adminLeadEmail(input: {
-  kind: 'contact' | 'beta' | 'waitlist' | 'newsletter';
+  kind: 'contact' | 'beta' | 'waitlist';
   email: string;
   summary: string;
   adminUrl: string;
@@ -173,21 +173,6 @@ export function adminLeadEmail(input: {
     `<p>From <strong>${escapeHtml(input.email)}</strong></p><pre style="white-space:pre-wrap;color:#A0A0A0;">${escapeHtml(input.summary)}</pre>` +
       button(input.adminUrl, 'Open the admin dashboard'),
     'Administrator notification.'
-  );
-  return { subject, text, html };
-}
-
-export function newsletterConfirmEmail(input: { confirmUrl: string; unsubscribeUrl: string }): RenderedEmail {
-  const subject = 'Revercue — confirm your newsletter subscription';
-  const text =
-    `Confirm your Revercue newsletter subscription: ${input.confirmUrl}\n\n` +
-    `If you did not request this, ignore the email. Unsubscribe: ${input.unsubscribeUrl}`;
-  const html = layout(
-    'Confirm your subscription',
-    '<p>One click confirms your Revercue newsletter subscription.</p>' +
-      button(input.confirmUrl, 'Confirm subscription') +
-      `<p style="font-size:12px;color:#777;">Did not request this? Ignore the email, or <a href="${escapeHtml(input.unsubscribeUrl)}" style="color:#C9A961;">unsubscribe</a>.</p>`,
-    'Revercue — Your work should speak, not you.'
   );
   return { subject, text, html };
 }

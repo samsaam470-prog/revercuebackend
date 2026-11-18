@@ -99,8 +99,8 @@ outside migrations and is treated as pre-existing production state.
   owner; built-in templates are admin-managed and cannot be edited/deleted by users; tags are
   parsed from JSON or CSV; `template_metadata` holds description/category; URL imports go
   through the SSRF guard.
-- Marketing: `POST /api/newsletter` (double opt-in, normalised email, no duplicates, consent
-  timestamp, HMAC confirm/unsubscribe links), `POST /api/contact`, `POST /api/waitlist`,
+- Marketing: `POST /api/newsletter` (single opt-in, normalised email, no duplicates, consent
+  timestamp, HMAC unsubscribe links; legacy confirm links still honoured), `POST /api/contact`, `POST /api/waitlist`,
   `POST /api/beta`, all rate limited and spam-guarded, storing submissions even if the
   notification email fails. Admin-only listing/export endpoints were added.
 - Admin: user list/detail/plan/delete, payments, waitlist, beta, contact, website-help,
@@ -137,7 +137,7 @@ outside migrations and is treated as pre-existing production state.
 | `src/services/document-links.ts` | Short-lived HMAC download/signing links |
 | `src/services/retention.ts` | Warning/expiry policy, PDF delivery gate, retry, deletion |
 | `src/services/form-submissions.ts` | Persist-then-enrich submissions, validation, processing states |
-| `src/services/newsletter.ts` | Subscriber state machine + signed confirm/unsubscribe tokens |
+| `src/services/newsletter.ts` | Subscriber state machine + signed unsubscribe/legacy-confirm tokens |
 | `src/services/notification-preferences.ts` | Canonical preference keys, legacy mapping |
 | `src/services/email-templates.ts` | Revercue-native email bodies |
 | `src/services/email-retry.ts` | Backoff/terminal-state helpers |
@@ -255,7 +255,7 @@ longer written or read.
 | `COOPER_INBOX_ID`, `OPENMAIL_INBOX_ID` | Sending inboxes |
 | `AUTHACTION_ISSUER` | `https://revercue.in.authaction.com` (discovery publishes it with a trailing slash; both forms are accepted) |
 | `AUTHACTION_AUDIENCE` | `revercue-api.samsaam470.workers.dev` |
-| `AUTHACTION_CLIENT_ID` (optional) | `6afa55be765d68ab52b7acee`; enables the client-id/ID-token guard |
+| `AUTHACTION_CLIENT_ID` (public, optional) | `OXJC1YmE3BwYU03xKfrMblC2F8hr9AC4`; enables the client-id/ID-token guard (never used as the API audience) |
 | `ADMIN_USER` | Admin dashboard username (existing) |
 | `ALLOW_LEGACY_AUTH` | `true` during migration, `false` to retire legacy auth |
 | `RETENTION_WARNING_DAYS` | Warning window, default `10` |
@@ -465,7 +465,7 @@ suite was added, and no production command was executed.
 4. Set every secret in E/B; confirm `AUTHACTION_ISSUER`/`AUDIENCE` match AuthAction discovery.
 5. Deploy the Worker (`npx wrangler deploy`).
 6. Smoke test: `/api/health`, `GET /api/auth/me` with an AuthAction token, one legacy token
-   (still allowed), a public proposal page, and `/api/newsletter` double opt-in.
+   (still allowed), a public proposal page, and `/api/newsletter` single opt-in.
 7. Sign a test contract end-to-end: freelancer sign → publish → client sign → signed PDF
    download as both parties; confirm a second signature returns `409`.
 8. Trigger the cron manually (`wrangler dev --test-scheduled` or a temporary crontab entry)

@@ -6,8 +6,8 @@ import { hashIp, clientIp, clientUserAgent } from '../utils/http';
 import { jsonError } from '../utils/api-errors';
 import { checkRateLimit } from '../services/rate-limit';
 import { isValidEmail, normalizeEmail, sendEmail } from '../services/email';
-import { adminLeadEmail, newsletterConfirmEmail } from '../services/email-templates';
-import { createNewsletterToken, nextStatus, verifyNewsletterToken, type SubscriberStatus } from '../services/newsletter';
+import { adminLeadEmail } from '../services/email-templates';
+import { nextStatus, verifyNewsletterToken, type SubscriberStatus } from '../services/newsletter';
 import { MARKETING_MESSAGE_MAX } from '../config/constants';
 import type { Bindings } from '../types';
 
@@ -28,7 +28,7 @@ function appUrl(env: Bindings): string {
 
 async function notifyAdmin(
   env: Bindings,
-  kind: 'contact' | 'beta' | 'waitlist' | 'newsletter',
+  kind: 'contact' | 'beta' | 'waitlist',
   email: string,
   summary: string
 ): Promise<void> {
@@ -73,6 +73,8 @@ marketing.post('/newsletter', async (c) => {
   );
   const current = (existing.rows[0]?.status as SubscriberStatus | undefined) ?? null;
   if (current === 'active') {
+    // Repeated submission by an active subscriber is a no-op. Never send a
+    // confirmation or an administrator notification.
     return c.json({ success: true, status: 'active', already_subscribed: true, email_sent: false });
   }
 
@@ -80,37 +82,50 @@ marketing.post('/newsletter', async (c) => {
   const ipHash = await hashIp(ip, c.env.USER_JWT_KEY);
   const status = nextStatus(current, 'subscribe');
 
+  // One row per address. `unsubscribed_at` is deliberately not cleared so the
+  // prior opt-out remains part of the subscriber's history even when they
+  // deliberately subscribe again through this endpoint.
   if (existing.rows.length > 0) {
     await tursoExecute(
       c.env,
-      `UPDATE newsletter_subscribers SET status = ?, consent_source = COALESCE(consent_source, ?), consent_at = COALESCE(consent_at, ?), unsubscribed_at = NULL, updated_at = ? WHERE email = ?`,
-      [status, 'website', now, now, email]
+      `UPDATE newsletter_subscribers
+       SET status = ?, consent_source = COALESCE(consent_source, ?), consent_at = COALESCE(consent_at, ?),
+           confirmed_at = COALESCE(confirmed_at, ?), updated_at = ?
+       WHERE email = ?`,
+      [status, 'website', now, now, now, email]
     );
   } else {
-    await tursoExecute(
-      c.env,
-      `INSERT INTO newsletter_subscribers (id, email, status, consent_source, consent_at, confirmed_at, unsubscribed_at, user_id, ip_hash, created_at, updated_at)
-       VALUES (?, ?, ?, 'website', ?, NULL, NULL, NULL, ?, ?, ?)`,
-      [generateId('nl'), email, status, now, ipHash, now, now]
-    );
+    try {
+      await tursoExecute(
+        c.env,
+        `INSERT INTO newsletter_subscribers (id, email, status, consent_source, consent_at, confirmed_at, unsubscribed_at, user_id, ip_hash, created_at, updated_at)
+         VALUES (?, ?, ?, 'website', ?, ?, NULL, NULL, ?, ?, ?)`,
+        [generateId('nl'), email, status, now, now, ipHash, now, now]
+      );
+    } catch (error) {
+      // A concurrent request may have inserted the same unique email between
+      // the lookup above and this insert. Resolve it as an update instead of
+      // failing the subscriber's request.
+      const raced = await tursoQuery(
+        c.env,
+        `SELECT id, status FROM newsletter_subscribers WHERE email = ? LIMIT 1`,
+        [email]
+      );
+      if (raced.rows.length === 0) throw error;
+      await tursoExecute(
+        c.env,
+        `UPDATE newsletter_subscribers
+         SET status = ?, consent_source = COALESCE(consent_source, ?), consent_at = COALESCE(consent_at, ?),
+             confirmed_at = COALESCE(confirmed_at, ?), updated_at = ?
+         WHERE email = ?`,
+        [status, 'website', now, now, now, email]
+      );
+    }
   }
 
-  const confirmToken = await createNewsletterToken(c.env, email, 'confirm');
-  const unsubscribeToken = await createNewsletterToken(c.env, email, 'unsubscribe');
-  const rendered = newsletterConfirmEmail({
-    confirmUrl: `${appUrl(c.env)}/api/newsletter/confirm?token=${encodeURIComponent(confirmToken)}`,
-    unsubscribeUrl: `${appUrl(c.env)}/api/newsletter/unsubscribe?token=${encodeURIComponent(unsubscribeToken)}`,
-  });
-  const sent = await sendEmail(c.env, {
-    to: email,
-    subject: rendered.subject,
-    text: rendered.text,
-    html: rendered.html,
-    kind: 'newsletter_confirm',
-    idempotencyKey: `newsletter-confirm:${email}:${now.slice(0, 10)}`,
-  });
-
-  return c.json({ success: true, status, email_sent: sent.ok }, 201);
+  // No confirmation email, no confirmation token, and no admin notification:
+  // the subscription succeeds even when every email provider is unavailable.
+  return c.json({ success: true, status, email_sent: false }, 201);
 });
 
 marketing.get('/newsletter/confirm', async (c) => {

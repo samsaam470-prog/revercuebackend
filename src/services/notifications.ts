@@ -12,6 +12,11 @@ export interface NotificationInput {
   body?: string | null;
   clientName?: string | null;
   documentTitle?: string | null;
+  /**
+   * Set false when the caller sends its own richer email for the same event,
+   * so the user does not receive two messages for one action.
+   */
+  sendEmail?: boolean;
 }
 
 /** In-app notification + best-effort email. Ownership is always the user id. */
@@ -33,12 +38,15 @@ export async function createNotification(env: Bindings, input: NotificationInput
     ]
   );
 
-  await maybeSendEmail(env, {
-    userId: input.userId,
-    eventType: input.eventType,
-    clientName: input.clientName ?? null,
-    documentTitle: input.documentTitle ?? null,
-  });
+  if (input.sendEmail !== false) {
+    await maybeSendEmail(env, {
+      userId: input.userId,
+      eventType: input.eventType,
+      clientName: input.clientName ?? null,
+      documentTitle: input.documentTitle ?? null,
+      idempotencyKey: `notification:${id}`,
+    });
+  }
 
   return id;
 }
