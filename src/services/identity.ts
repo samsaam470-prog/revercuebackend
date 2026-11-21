@@ -1,29 +1,30 @@
 import { tursoQuery, tursoExecute } from '../utils/turso';
-import { generateId } from '../utils/ids';
-import { generateOTP, hashOTP, otpExpiryISO, verifyOTP } from '../utils/otp';
-import { checkRateLimit } from './rate-limit';
+import { sha256Hex } from '../utils/crypto';
 import type { Bindings } from '../types';
 
 /**
  * Revercue-side identity mapping for AuthAction subjects.
  *
- * Revercue stays the source of truth for plans, payments, roles and business
- * records. AuthAction is the source of truth for *authentication*. The two are
+ * AuthAction is the source of truth for authentication. Revercue remains the
+ * source of truth for plans, payments, roles and business records. The two are
  * joined through `user_identities`, keyed on the stable AuthAction `sub`.
  *
- * Accounts are never merged on an email match alone: linking an existing
- * Revercue user requires proving control of the mailbox with a one-time code
- * sent to the address. That is what prevents account takeover by an attacker
- * who registers the same email at a different identity provider.
+ * Provisioning is just-in-time and idempotent:
+ *  - an existing `(provider, subject)` mapping always wins;
+ *  - a brand-new subject gets one deterministic Revercue user id, so concurrent
+ *    requests cannot create duplicate users;
+ *  - an existing Revercue user may be adopted only when AuthAction asserts that
+ *    the email is verified. An unverified email is never treated as proof of
+ *    account ownership.
  */
 
 const PROVIDER = 'authaction';
-const LINK_CODE_MAX_ATTEMPTS = 3;
-const LINK_CODE_EXPIRY_MINUTES = 10;
-const LINK_CODE_COOLDOWN_SECONDS = 60;
 
-export function otpSecret(env: Bindings): string {
-  return env.OTP_HASH_KEY || env.USER_JWT_KEY;
+export class IdentityStoreError extends Error {
+  constructor(message = 'The identity store is unavailable.') {
+    super(message);
+    this.name = 'IdentityStoreError';
+  }
 }
 
 export interface RevercueUser {
@@ -40,11 +41,53 @@ export interface UserIdentityRow {
   email_at_link: string | null;
 }
 
+export type ProvisionFailureCode =
+  | 'email_verification_required'
+  | 'account_conflict'
+  | 'identity_orphaned';
+
+export type ProvisionResult =
+  | {
+      ok: true;
+      user: RevercueUser;
+      created: boolean;
+      linked_existing: boolean;
+    }
+  | {
+      ok: false;
+      code: ProvisionFailureCode;
+      message: string;
+    };
+
+export interface AuthActionIdentityInput {
+  subject: string;
+  email: string | null;
+  emailVerified: boolean;
+}
+
+async function identityQuery(env: Bindings, sql: string, args: unknown[] = []) {
+  try {
+    return await tursoQuery(env, sql, args as any[]);
+  } catch (error: any) {
+    console.error('IDENTITY_STORE_QUERY_FAILED', error?.message ?? error);
+    throw new IdentityStoreError();
+  }
+}
+
+async function identityExecute(env: Bindings, sql: string, args: unknown[] = []) {
+  try {
+    await tursoExecute(env, sql, args as any[]);
+  } catch (error: any) {
+    console.error('IDENTITY_STORE_WRITE_FAILED', error?.message ?? error);
+    throw new IdentityStoreError();
+  }
+}
+
 export async function findIdentity(
   env: Bindings,
   subject: string
 ): Promise<UserIdentityRow | null> {
-  const result = await tursoQuery(
+  const result = await identityQuery(
     env,
     `SELECT id, user_id, provider, subject, email_at_link FROM user_identities WHERE provider = ? AND subject = ? LIMIT 1`,
     [PROVIDER, subject]
@@ -53,15 +96,8 @@ export async function findIdentity(
 }
 
 export async function getUserById(env: Bindings, userId: string): Promise<RevercueUser | null> {
-  const result = await tursoQuery(env, `SELECT id, email, plan FROM users WHERE id = ? LIMIT 1`, [userId]);
-  if (result.rows.length === 0) return null;
-  const row = result.rows[0];
-  return { id: String(row.id), email: String(row.email ?? ''), plan: String(row.plan ?? 'free') };
-}
-
-export async function findUserByEmail(env: Bindings, email: string): Promise<RevercueUser | null> {
-  const result = await tursoQuery(env, `SELECT id, email, plan FROM users WHERE lower(email) = ? LIMIT 1`, [
-    email.trim().toLowerCase(),
+  const result = await identityQuery(env, `SELECT id, email, plan FROM users WHERE id = ? LIMIT 1`, [
+    userId,
   ]);
   if (result.rows.length === 0) return null;
   const row = result.rows[0];
@@ -69,40 +105,75 @@ export async function findUserByEmail(env: Bindings, email: string): Promise<Rev
 }
 
 /**
- * Creates a Revercue user for a brand-new AuthAction subject.
- * Deliberately minimal: only columns that exist on the current users table.
+ * Returns every Revercue user with this email, case-insensitively. More than
+ * one match is a data ambiguity that must not be resolved by guessing.
  */
-export async function createRevercueUser(
-  env: Bindings,
-  input: { email: string; emailVerified: boolean }
-): Promise<string> {
-  const userId = generateId('usr');
-  const now = new Date().toISOString();
-  await tursoExecute(
+export async function findUsersByEmail(env: Bindings, email: string): Promise<RevercueUser[]> {
+  const normalized = email.trim().toLowerCase();
+  const result = await identityQuery(
     env,
-    `INSERT INTO users (id, email, plan, email_verified, onboarding_step, created_at, updated_at) VALUES (?, ?, 'free', ?, 1, ?, ?)`,
-    [userId, input.email.trim().toLowerCase(), input.emailVerified ? 1 : 0, now, now]
+    `SELECT id, email, plan FROM users WHERE lower(email) = ? LIMIT 5`,
+    [normalized]
   );
-  return userId;
+  return result.rows.map((row: any) => ({
+    id: String(row.id),
+    email: String(row.email ?? ''),
+    plan: String(row.plan ?? 'free'),
+  }));
 }
 
-export async function linkIdentity(
+async function authActionUserId(subject: string): Promise<string> {
+  // Deterministic on purpose: concurrent first requests for the same subject
+  // target the same primary key, so the users table cannot gain duplicates.
+  return `usr_${await sha256Hex(`authaction:${subject}`)}`;
+}
+
+async function insertUserIfAbsent(
   env: Bindings,
-  input: { userId: string; subject: string; email: string | null }
-): Promise<'linked' | 'already_linked'> {
+  input: { id: string; email: string }
+): Promise<boolean> {
   const now = new Date().toISOString();
-  try {
-    await tursoExecute(
-      env,
-      `INSERT INTO user_identities (id, user_id, provider, subject, email_at_link, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [generateId('idn'), input.userId, PROVIDER, input.subject, input.email, now, now]
-    );
-    return 'linked';
-  } catch (error: any) {
-    const existing = await findIdentity(env, input.subject);
-    if (existing) return existing.user_id === input.userId ? 'already_linked' : 'already_linked';
-    throw error;
-  }
+  const result = await identityQuery(
+    env,
+    `INSERT INTO users (id, email, plan, email_verified, onboarding_step, created_at, updated_at)
+     VALUES (?, ?, 'free', 1, 1, ?, ?)
+     ON CONFLICT(id) DO NOTHING
+     RETURNING id`,
+    [input.id, input.email, now, now]
+  );
+  return result.rows.length > 0;
+}
+
+async function insertIdentityIfAbsent(
+  env: Bindings,
+  input: { userId: string; subject: string; email: string }
+): Promise<boolean> {
+  const now = new Date().toISOString();
+  const result = await identityQuery(
+    env,
+    `INSERT INTO user_identities (id, user_id, provider, subject, email_at_link, created_at, last_login_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(provider, subject) DO NOTHING
+     RETURNING id`,
+    [
+      `idn_${await sha256Hex(`authaction:${input.subject}:${input.userId}`)}`,
+      input.userId,
+      PROVIDER,
+      input.subject,
+      input.email,
+      now,
+      now,
+    ]
+  );
+  return result.rows.length > 0;
+}
+
+async function markEmailVerified(env: Bindings, userId: string): Promise<void> {
+  await identityExecute(
+    env,
+    `UPDATE users SET email_verified = 1, updated_at = ? WHERE id = ? AND COALESCE(email_verified, 0) = 0`,
+    [new Date().toISOString(), userId]
+  );
 }
 
 export async function touchIdentityLogin(env: Bindings, subject: string): Promise<void> {
@@ -113,109 +184,135 @@ export async function touchIdentityLogin(env: Bindings, subject: string): Promis
   ).catch((error) => console.error('IDENTITY_TOUCH_FAILED', error));
 }
 
-export interface LinkCodeStart {
-  ok: boolean;
-  retryAfter?: number;
-  code?: string;
-  email?: string;
-}
-
 /**
- * Starts an account-link challenge. The code is always emailed to the address
- * being linked, so possession of the mailbox is the proof.
+ * Establishes or retrieves the Revercue application user for an authenticated
+ * AuthAction identity. Safe to call on every authenticated request.
  */
-export async function startLinkChallenge(
+export async function resolveOrProvisionUser(
   env: Bindings,
-  input: { subject: string; email: string; ip: string }
-): Promise<LinkCodeStart> {
-  const email = input.email.trim().toLowerCase();
-  const secret = otpSecret(env);
+  identity: AuthActionIdentityInput
+): Promise<ProvisionResult> {
+  const subject = identity.subject.trim();
+  if (!subject) {
+    return {
+      ok: false,
+      code: 'identity_orphaned',
+      message: 'The authenticated identity has no usable subject.',
+    };
+  }
 
-  const limit = await checkRateLimit(env, `link:${input.subject}:${input.ip}`, 3, 3600);
-  if (!limit.allowed) return { ok: false, retryAfter: limit.retryAfter };
-
-  const recent = await tursoQuery(
-    env,
-    `SELECT created_at FROM auth_link_codes WHERE subject = ? AND lower(email) = ? ORDER BY created_at DESC LIMIT 1`,
-    [input.subject, email]
-  );
-  if (recent.rows.length > 0) {
-    const elapsed = (Date.now() - new Date(String(recent.rows[0].created_at)).getTime()) / 1000;
-    if (elapsed < LINK_CODE_COOLDOWN_SECONDS) {
-      return { ok: false, retryAfter: Math.ceil(LINK_CODE_COOLDOWN_SECONDS - elapsed) };
+  const existingIdentity = await findIdentity(env, subject);
+  if (existingIdentity) {
+    const user = await getUserById(env, existingIdentity.user_id);
+    if (!user) {
+      return {
+        ok: false,
+        code: 'identity_orphaned',
+        message: 'This sign-in is attached to an application account that no longer exists.',
+      };
     }
+    return { ok: true, user, created: false, linked_existing: false };
   }
 
-  const code = generateOTP();
-  const now = new Date().toISOString();
-  await tursoExecute(
-    env,
-    `INSERT INTO auth_link_codes (id, subject, email, code_hash, attempts, expires_at, consumed_at, created_at) VALUES (?, ?, ?, ?, 0, ?, NULL, ?)`,
-    [generateId('lnk'), input.subject, email, await hashOTP(code, secret), otpExpiryISO(LINK_CODE_EXPIRY_MINUTES), now]
-  );
-  return { ok: true, code, email };
-}
-
-export type LinkConfirmResult =
-  | { ok: true; userId: string; created: boolean }
-  | { ok: false; reason: 'no_code' | 'expired' | 'too_many_attempts' | 'invalid_code' };
-
-export async function confirmLinkChallenge(
-  env: Bindings,
-  input: { subject: string; email: string; code: string }
-): Promise<LinkConfirmResult> {
-  const email = input.email.trim().toLowerCase();
-  const result = await tursoQuery(
-    env,
-    `SELECT * FROM auth_link_codes WHERE subject = ? AND lower(email) = ? AND consumed_at IS NULL ORDER BY created_at DESC LIMIT 1`,
-    [input.subject, email]
-  );
-  if (result.rows.length === 0) return { ok: false, reason: 'no_code' };
-  const row = result.rows[0];
-  if (new Date(String(row.expires_at)).getTime() < Date.now()) {
-    await tursoExecute(env, `DELETE FROM auth_link_codes WHERE id = ?`, [row.id]);
-    return { ok: false, reason: 'expired' };
+  // Only a claim that AuthAction has verified may be used to match an existing
+  // Revercue account. A client-supplied or unverified email is never enough.
+  if (!identity.email || identity.emailVerified !== true) {
+    return {
+      ok: false,
+      code: 'email_verification_required',
+      message: 'Verify your email address with AuthAction before continuing to Revercue.',
+    };
   }
-  if (Number(row.attempts) >= LINK_CODE_MAX_ATTEMPTS) {
-    return { ok: false, reason: 'too_many_attempts' };
-  }
-  const valid = await verifyOTP(input.code, String(row.code_hash), otpSecret(env));
-  if (!valid) {
-    await tursoExecute(env, `UPDATE auth_link_codes SET attempts = attempts + 1 WHERE id = ?`, [row.id]);
-    return { ok: false, reason: 'invalid_code' };
-  }
-  await tursoExecute(env, `UPDATE auth_link_codes SET consumed_at = ? WHERE id = ?`, [
-    new Date().toISOString(),
-    row.id,
-  ]);
 
-  const existingUser = await findUserByEmail(env, email);
-  let userId: string;
+  const email = identity.email.trim().toLowerCase();
+  const matches = await findUsersByEmail(env, email);
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      code: 'account_conflict',
+      message:
+        'More than one Revercue account uses this email address. Contact support so the accounts can be resolved safely.',
+    };
+  }
+
+  const existingUser = matches[0] ?? null;
+  let user: RevercueUser | null = existingUser;
   let created = false;
-  if (existingUser) {
-    userId = existingUser.id;
-  } else {
-    userId = await createRevercueUser(env, { email, emailVerified: true });
-    created = true;
-  }
+  let linkedExisting = Boolean(existingUser);
 
-  const link = await linkIdentity(env, { userId, subject: input.subject, email });
-  if (link === 'already_linked') {
-    const identity = await findIdentity(env, input.subject);
-    if (identity && identity.user_id !== userId) {
-      // Race: another request linked first. Use the winner's mapping.
-      return { ok: true, userId: identity.user_id, created: false };
+  if (user) {
+    await markEmailVerified(env, user.id);
+  } else {
+    const userId = await authActionUserId(subject);
+    try {
+      created = await insertUserIfAbsent(env, { id: userId, email });
+      user = await getUserById(env, userId);
+    } catch (error) {
+      if (!(error instanceof IdentityStoreError)) throw error;
+      // If the users table enforces a unique email, a concurrent request with
+      // the same verified email may have won the insert. Adopt that row rather
+      // than failing authentication or creating a duplicate profile.
+      const raced = await findUsersByEmail(env, email);
+      if (raced.length === 1) {
+        user = raced[0];
+        linkedExisting = true;
+        created = false;
+      } else if (raced.length > 1) {
+        return {
+          ok: false,
+          code: 'account_conflict',
+          message:
+            'More than one Revercue account uses this email address. Contact support so the accounts can be resolved safely.',
+        };
+      } else {
+        throw error;
+      }
+    }
+    if (!user) {
+      const raced = await findUsersByEmail(env, email);
+      if (raced.length === 1) {
+        user = raced[0];
+        linkedExisting = true;
+        created = false;
+      } else if (raced.length > 1) {
+        return {
+          ok: false,
+          code: 'account_conflict',
+          message:
+            'More than one Revercue account uses this email address. Contact support so the accounts can be resolved safely.',
+        };
+      } else {
+        throw new IdentityStoreError('The application account could not be created.');
+      }
     }
   }
-  return { ok: true, userId, created };
-}
 
-/** Resolves an AuthAction subject to a Revercue user without creating one. */
-export async function resolveSubject(
-  env: Bindings,
-  subject: string
-): Promise<RevercueUser | null> {
-  const identity = await findIdentity(env, subject);
-  if (!identity) return null;
-  return getUserById(env, identity.user_id);
+  const inserted = await insertIdentityIfAbsent(env, {
+    userId: user.id,
+    subject,
+    email,
+  });
+
+  // The unique (provider, subject) index is the final concurrency guard. If
+  // another request won the race, use that request's mapping.
+  const winner = await findIdentity(env, subject);
+  if (!winner) throw new IdentityStoreError('The identity mapping could not be read.');
+  if (winner.user_id !== user.id) {
+    const winnerUser = await getUserById(env, winner.user_id);
+    if (!winnerUser) {
+      return {
+        ok: false,
+        code: 'identity_orphaned',
+        message: 'This sign-in is attached to an application account that no longer exists.',
+      };
+    }
+    return { ok: true, user: winnerUser, created: false, linked_existing: false };
+  }
+
+  return {
+    ok: true,
+    user,
+    created: created && inserted,
+    linked_existing: linkedExisting,
+  };
 }

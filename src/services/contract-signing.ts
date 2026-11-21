@@ -515,7 +515,7 @@ export async function publishSignedContract(
     `SELECT name, email FROM clients WHERE id = ? LIMIT 1`,
     [contract.client_id]
   ).catch(() => null);
-  const appBase = (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.pages.dev').replace(/\/$/, '');
+  const appBase = (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.co.uk').replace(/\/$/, '');
   const signUrl = `${appBase}/c/${publicId}`;
   if (client?.email) {
     const rendered = contractAwaitingSignatureEmail({

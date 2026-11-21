@@ -194,7 +194,7 @@ invoices.post('/:id/publish', async (c) => {
     documentId: row.id,
     title: `Invoice published: ${row.invoice_number}`,
   });
-  const base = (c.env.APP_URL || c.env.FRONTEND_ORIGIN || 'https://revercue.pages.dev').replace(/\/$/, '');
+  const base = (c.env.APP_URL || c.env.FRONTEND_ORIGIN || 'https://revercue.co.uk').replace(/\/$/, '');
   return c.json({ success: true, public_id: publicId, url: `${base}/i/${publicId}` });
 });
 

@@ -255,7 +255,7 @@ export function warningWindowDays(env: Bindings): number {
 async function sendWarning(env: Bindings, candidate: RetentionCandidate, daysRemaining: number): Promise<boolean> {
   const user = await tursoQuery(env, `SELECT email, name FROM users WHERE id = ? LIMIT 1`, [candidate.userId]);
   const email = user.rows[0]?.email ? String(user.rows[0].email) : null;
-  const base = (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.pages.dev').replace(/\/$/, '');
+  const base = (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.co.uk').replace(/\/$/, '');
 
   await createNotification(env, {
     userId: candidate.userId,

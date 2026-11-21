@@ -23,7 +23,7 @@ function adminEmail(env: Bindings): string | null {
 }
 
 function appUrl(env: Bindings): string {
-  return (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.pages.dev').replace(/\/$/, '');
+  return (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.co.uk').replace(/\/$/, '');
 }
 
 async function notifyAdmin(

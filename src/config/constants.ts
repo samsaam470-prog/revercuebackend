@@ -211,12 +211,11 @@ export const CONTRACT_VERSION_STATUS = {
 } as const;
 
 /** Bump when the consent wording changes; it is stored with every signature. */
-export const SIGNING_CONSENT_VERSION = '2026-11-01';
+export const SIGNING_CONSENT_VERSION = '2026-11-21';
 
 export const SIGNING_CONSENT_TEXT =
   'I agree that typing or drawing my name constitutes my electronic signature on this contract ' +
-  'version, that I have read and accept its terms, and that this signature is legally binding ' +
-  'under the Electronic Transactions Ordinance / ESIGN Act equivalent applicable to me.';
+  'version, and that I have read and accept its terms.';
 
 /** Max decoded size of a drawn signature image. */
 export const SIGNATURE_MAX_BYTES = 512 * 1024;

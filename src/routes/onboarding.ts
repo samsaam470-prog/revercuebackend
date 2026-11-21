@@ -1,32 +1,50 @@
-﻿import { Hono } from 'hono';
-import { tursoExecute } from '../utils/turso';
-import { userAuthMiddleware } from '../middleware/user-auth';
+import { Hono } from 'hono';
+import { tursoExecute, tursoQuery } from '../utils/turso';
+import { userAuthMiddleware, getAuth } from '../middleware/user-auth';
+import { generateId } from '../utils/ids';
+import {
+  onboardingStep1Schema,
+  onboardingStep2Schema,
+  onboardingStep4Schema,
+  onboardingStep5Schema,
+  tutorialSchema,
+} from '../utils/validate';
+import { jsonError } from '../utils/api-errors';
 import type { Bindings } from '../types';
 
 const onboarding = new Hono<{ Bindings: Bindings }>();
 onboarding.use('*', userAuthMiddleware);
 
+function firstIssue(result: { success: false; error: any }): string {
+  return String(result.error?.issues?.[0]?.message ?? 'Check the submitted values.');
+}
+
 onboarding.patch('/step-1', async (c) => {
-  const uid = (c.get('user' as never) as any).sub;
-  const b = await c.req.json();
-  if (!b.account_type || !['freelancer', 'agency'].includes(b.account_type)) {
-    return c.json({ error: 'invalid_payload' }, 400);
+  const auth = getAuth(c);
+  const parsed = onboardingStep1Schema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) {
+    return jsonError(c, 400, 'invalid_payload', firstIssue(parsed));
   }
-  await tursoExecute(c.env, `UPDATE users SET account_type = ?, onboarding_step = 2, updated_at = ? WHERE id = ?`, [b.account_type, new Date().toISOString(), uid]);
+  await tursoExecute(
+    c.env,
+    `UPDATE users SET account_type = ?, onboarding_step = 2, updated_at = ? WHERE id = ?`,
+    [parsed.data.account_type, new Date().toISOString(), auth.userId]
+  );
   return c.json({ success: true, onboarding_step: 2 });
 });
 
 onboarding.patch('/step-2', async (c) => {
-  const uid = (c.get('user' as never) as any).sub;
-  const b = await c.req.json();
-  if (!b.name || String(b.name).trim().length === 0) {
-    return c.json({ error: 'invalid_payload', message: 'Name is required.' }, 400);
+  const auth = getAuth(c);
+  const parsed = onboardingStep2Schema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) {
+    return jsonError(c, 400, 'invalid_payload', firstIssue(parsed));
   }
+  const b = parsed.data;
   await tursoExecute(
     c.env,
     `UPDATE users SET name = ?, business_name = ?, services = ?, volume_per_month = ?, website = ?, fiverr_profile = ?, agency_name = ?, agency_size = ?, brand_primary = ?, brand_secondary = ?, onboarding_step = 3, updated_at = ? WHERE id = ?`,
     [
-      b.name ?? null,
+      b.name.trim(),
       b.business_name ?? null,
       JSON.stringify(b.services ?? []),
       b.volume_per_month ?? null,
@@ -37,53 +55,103 @@ onboarding.patch('/step-2', async (c) => {
       b.brand_primary ?? null,
       b.brand_secondary ?? null,
       new Date().toISOString(),
-      uid,
+      auth.userId,
     ]
   );
   return c.json({ success: true, onboarding_step: 3 });
 });
 
 onboarding.post('/website-help', async (c) => {
-  const uid = (c.get('user' as never) as any).sub;
-  const b = await c.req.json();
-  if (!b.website_type || !b.timeline) return c.json({ error: 'invalid_payload' }, 400);
-  const { generateId } = await import('../utils/ids');
+  const auth = getAuth(c);
+  const b = await c.req.json().catch(() => ({}));
+  const websiteType = String(b.website_type ?? '').trim();
+  const timeline = String(b.timeline ?? '').trim();
+  if (!websiteType || !timeline) {
+    return jsonError(c, 400, 'invalid_payload', 'website_type and timeline are required.');
+  }
   await tursoExecute(
     c.env,
     `INSERT INTO website_help_requests (id, user_id, name, email, website_type, business, timeline, notes, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)`,
-    [generateId('wh'), uid, b.name ?? null, b.email ?? null, b.website_type, b.business ?? null, b.timeline, b.notes ?? null, new Date().toISOString()]
+    [
+      generateId('wh'),
+      auth.userId,
+      b.name ? String(b.name).slice(0, 200) : null,
+      auth.email,
+      websiteType.slice(0, 100),
+      b.business ? String(b.business).slice(0, 200) : null,
+      timeline.slice(0, 100),
+      b.notes ? String(b.notes).slice(0, 4000) : null,
+      new Date().toISOString(),
+    ]
   );
   return c.json({ success: true }, 201);
 });
 
 onboarding.patch('/step-4', async (c) => {
-  const uid = (c.get('user' as never) as any).sub;
-  const b = await c.req.json();
-  await tursoExecute(c.env, `UPDATE users SET newsletter_opt_in = ?, newsletter_opt_in_date = ?, onboarding_step = 5, updated_at = ? WHERE id = ?`, [b.newsletter_opt_in ? 1 : 0, b.newsletter_opt_in ? new Date().toISOString() : null, new Date().toISOString(), uid]);
+  const auth = getAuth(c);
+  const parsed = onboardingStep4Schema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) {
+    return jsonError(c, 400, 'invalid_payload', firstIssue(parsed));
+  }
+  const newsletter = parsed.data.newsletter_opt_in;
+  await tursoExecute(
+    c.env,
+    `UPDATE users SET newsletter_opt_in = ?, newsletter_opt_in_date = ?, onboarding_step = 5, updated_at = ? WHERE id = ?`,
+    [
+      newsletter ? 1 : 0,
+      newsletter ? new Date().toISOString() : null,
+      new Date().toISOString(),
+      auth.userId,
+    ]
+  );
   return c.json({ success: true, onboarding_step: 5 });
 });
 
 onboarding.patch('/step-5', async (c) => {
-  const uid = (c.get('user' as never) as any).sub;
-  const b = await c.req.json();
-  if (b.plan === 'waitlist') {
-    const { generateId } = await import('../utils/ids');
-    const user = await tursoExecute(c.env, `SELECT email FROM users WHERE id = ?`, [uid]);
-    await tursoExecute(
-      c.env,
-      `INSERT INTO waitlist (id, email, plan_requested, source, status, created_at) VALUES (?, ?, ?, 'onboarding', 'pending', ?)`,
-      [generateId('wl'), (user as any)?.email ?? '', b.plan_requested ?? 'starter', new Date().toISOString()]
-    );
+  const auth = getAuth(c);
+  const parsed = onboardingStep5Schema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success) {
+    return jsonError(c, 400, 'invalid_payload', firstIssue(parsed));
   }
-  await tursoExecute(c.env, `UPDATE users SET onboarding_step = 6, updated_at = ? WHERE id = ?`, [new Date().toISOString(), uid]);
+  if (parsed.data.plan === 'waitlist') {
+    const existing = await tursoQuery(
+      c.env,
+      `SELECT id FROM waitlist WHERE lower(email) = ? AND status = 'pending' LIMIT 1`,
+      [auth.email.trim().toLowerCase()]
+    );
+    if (existing.rows.length === 0) {
+      await tursoExecute(
+        c.env,
+        `INSERT INTO waitlist (id, email, plan_requested, source, status, created_at) VALUES (?, ?, ?, 'onboarding', 'pending', ?)`,
+        [
+          generateId('wl'),
+          auth.email,
+          parsed.data.plan_requested ?? 'starter',
+          new Date().toISOString(),
+        ]
+      );
+    }
+  }
+  await tursoExecute(
+    c.env,
+    `UPDATE users SET onboarding_step = 6, updated_at = ? WHERE id = ?`,
+    [new Date().toISOString(), auth.userId]
+  );
   return c.json({ success: true, onboarding_step: 6 });
 });
 
 onboarding.patch('/tutorial', async (c) => {
-  const uid = (c.get('user' as never) as any).sub;
-  const b = await c.req.json();
-  const col = b.completed ? 'tutorial_completed' : 'tutorial_skipped';
-  await tursoExecute(c.env, `UPDATE users SET ${col} = 1, updated_at = ? WHERE id = ?`, [new Date().toISOString(), uid]);
+  const auth = getAuth(c);
+  const parsed = tutorialSchema.safeParse(await c.req.json().catch(() => ({})));
+  if (!parsed.success || (parsed.data.completed === undefined && parsed.data.skipped === undefined)) {
+    return jsonError(c, 400, 'invalid_payload', 'completed or skipped must be a boolean.');
+  }
+  const column = parsed.data.completed ? 'tutorial_completed' : 'tutorial_skipped';
+  await tursoExecute(
+    c.env,
+    `UPDATE users SET ${column} = 1, updated_at = ? WHERE id = ?`,
+    [new Date().toISOString(), auth.userId]
+  );
   return c.json({ success: true });
 });
 

@@ -1,5 +1,13 @@
 # Revercue backend — release 2.1 implementation report
 
+> **Post-release update (2026-11-21):** the account-linking OTP flow described
+> in this historical report has been removed. AuthAction users are now
+> provisioned directly and idempotently on their first authenticated request.
+> The current contract is `docs/AUTH_ONBOARDING.md`; where the two documents
+> disagree, that document wins. The canonical API base URL is
+> `https://api.revercue.co.uk`, while `AUTHACTION_AUDIENCE` intentionally remains
+> the existing API resource identifier.
+
 Prepared against `samsaam470-prog/revercuebackend` (branch `main`, commit `9c60423`).
 All schema requirements were derived from the source code, not from migration files; the
 repository only contained `migrations/0002_wiki_cache.sql`, so the base schema was created
@@ -19,19 +27,24 @@ outside migrations and is treated as pre-existing production state.
   ID tokens are rejected: through the audience check in normal configuration, and through
   explicit ID-token markers (`nonce`, `at_hash`, `c_hash`, `token_use`, `typ`) when an
   operator has misconfigured the audience to the client id.
-- **New** `src/services/identity.ts`: `user_identities` mapping of AuthAction `sub` →
-  Revercue user, a six-digit linking code flow (`auth_link_codes`), and **no automatic
-  account merging by email**. Linking an existing account requires an authenticated legacy
-  session plus the code, and only adopts the email when the claim is verified.
+- `src/services/identity.ts`: `user_identities` mapping of AuthAction `sub` → Revercue
+  user with **direct, idempotent provisioning**. There is no linking code flow. An existing
+  Revercue user is adopted only when AuthAction asserts that the email is verified and the
+  email matches exactly one user; concurrent first requests share a deterministic user id
+  and the unique `(provider, subject)` index decides any race. Legacy `auth_link_codes`
+  remains only as historical production data.
 - **Rewritten** `src/middleware/user-auth.ts`: one middleware for AuthAction bearer tokens and
   (behind `ALLOW_LEGACY_AUTH`, default on) the legacy HS256 app JWT. It always exposes the
   authenticated user (id, email, plan) and never trusts a client-supplied user id. Legacy
   sessions are still checked and `last_active_at` is touched.
 - **New** `src/middleware/access.ts`: `requirePlan`, `requireRole`, ownership assertions.
-- Auth routes: `GET /api/auth/me` now uses the shared middleware and returns the AuthAction
-  identity; `POST /api/auth/link/start` and `POST /api/auth/link/confirm` were added. The old
-  signup/login/OTP endpoints remain for compatibility until the frontend migrates.
-  Revercue remains the source of truth for plan, payment status, roles and feature access.
+- Auth routes: `GET /api/auth/me` uses the shared middleware, provisions or retrieves the
+  Revercue user, and returns `authenticated`, the user and an `onboarding` object
+  (`required`, `complete`, `step`, `next_step`, `destination`). The old signup/login/OTP
+  endpoints remain for compatibility until the frontend migrates. Revercue remains the
+  source of truth for plan, payment status, roles and feature access.
+- Removed: `POST /api/auth/link/start`, `POST /api/auth/link/confirm`, the account-link OTP
+  email template and the `account_link_required` response. Those routes now return `404`.
 
 ### Contracts: electronic signature
 - **New** `contract-state.ts` (pure rules), `contract-signing.ts` (persistence),
@@ -130,7 +143,7 @@ outside migrations and is treated as pre-existing production state.
 | File | Purpose |
 | --- | --- |
 | `src/services/authaction.ts` | AuthAction OIDC discovery, JWKS cache, access-token verification, ID-token rejection |
-| `src/services/identity.ts` | `user_identities` mapping + safe linking codes |
+| `src/services/identity.ts` | `user_identities` mapping + direct idempotent provisioning |
 | `src/services/contract-state.ts` | Pure contract state machine and signing rules |
 | `src/services/contract-signing.ts` | Version/signature persistence, publish, client sign, signed PDF orchestration |
 | `src/services/pdf-signed.ts` | Countersigned contract PDF with embedded signatures and evidence |
@@ -161,10 +174,10 @@ outside migrations and is treated as pre-existing production state.
 | `migrations/0004_document_lifecycle.sql` | Archive, retention warnings/deliveries, uploads, indexes |
 | `migrations/0005_forms_and_templates.sql` | Form submissions/settings, template metadata |
 | `migrations/0006_tracking_and_settings.sql` | Visit meta, suggestion dismissals, revision prices |
-| `migrations/turso/0001_identity_and_email.sql` | Identities, link codes, email deliveries, indexes |
+| `migrations/turso/0001_identity_and_email.sql` | Identities, legacy link-code table, email deliveries, indexes |
 | `migrations/turso/0002_marketing_and_admin.sql` | Newsletter subscribers, branding, admin audit |
 | `scripts/turso-migrate.mjs` | Idempotent Turso migration runner (libSQL HTTP pipeline) |
-| `test/*.test.ts` (7 files) | 59 unit tests (see I) |
+| `test/*.test.ts` | Unit and route tests; 99 passing after the post-release auth update (see I) |
 | `vitest.config.ts` | Test configuration |
 
 ### Modified
@@ -234,7 +247,7 @@ Existing, used by code: `users`, `sessions`, `notifications`, `payments`, `payme
 `feedback`, `admin_notes`, `instructions`, `patterns`, `pairings`, `error_logs`,
 `formsubmit_activations` (now unused).
 
-New: `user_identities`, `auth_link_codes`, `email_deliveries`, `newsletter_subscribers`,
+New: `user_identities`, `email_deliveries`, `newsletter_subscribers`,
 `user_branding`, `admin_audit_log`, `schema_migrations` (created by the runner).
 
 `formsubmit_activations` is **not dropped** (production data is preserved); it is simply no
@@ -247,14 +260,15 @@ longer written or read.
 ### A. Required non-secret variables (`[vars]`, already in `wrangler.toml`)
 | Name | Purpose |
 | --- | --- |
-| `FRONTEND_ORIGIN` | Primary CORS origin (`https://revercue.pages.dev`) |
-| `ALLOWED_ORIGINS` | Comma-separated extra CORS origins |
+| `FRONTEND_ORIGIN` | Primary CORS origin (`https://revercue.co.uk`) |
+| `ALLOWED_ORIGINS` | Additional CORS origins, including `https://revercue.pages.dev` |
+| `API_BASE_URL` | Canonical public API origin (`https://api.revercue.co.uk`) |
 | `TURSO_URL` | Turso database URL |
 | `B2_BUCKET_NAME`, `B2_KEY_ID`, `B2_S3_ENDPOINT` | Backblaze B2 storage identifiers |
 | `B2_S3_REGION` (optional) | Region for SigV4 signing, defaults from endpoint |
 | `COOPER_INBOX_ID`, `OPENMAIL_INBOX_ID` | Sending inboxes |
 | `AUTHACTION_ISSUER` | `https://revercue.in.authaction.com` (discovery publishes it with a trailing slash; both forms are accepted) |
-| `AUTHACTION_AUDIENCE` | `revercue-api.samsaam470.workers.dev` |
+| `AUTHACTION_AUDIENCE` | `revercue-api.samsaam470.workers.dev` (intentionally unchanged by the custom API hostname) |
 | `AUTHACTION_CLIENT_ID` (public, optional) | `OXJC1YmE3BwYU03xKfrMblC2F8hr9AC4`; enables the client-id/ID-token guard (never used as the API audience) |
 | `ADMIN_USER` | Admin dashboard username (existing) |
 | `ALLOW_LEGACY_AUTH` | `true` during migration, `false` to retire legacy auth |
@@ -395,6 +409,11 @@ signature" action.
 ## H. Remaining work
 
 1. **Frontend (required before release).**
+   - Replace the account-linking screen with direct AuthAction login; use
+     `GET /api/auth/me` to establish the session and route to
+     `onboarding.destination`. Handle `email_verification_required`,
+     `account_conflict`, `identity_orphaned` and `identity_store_unavailable`.
+     The full contract is `docs/AUTH_ONBOARDING.md`.
    - Drawn-signature UI + explicit consent checkbox for freelancer and client signing.
    - Stop treating "approve" as a signature; call `/sign` and handle `409 signature_required`.
    - Pass a stable `visit_id` (and `client_submission_id`) on tracking events.
@@ -405,9 +424,10 @@ signature" action.
      `SignupTransitionPage`, `src/types/index.ts`).
    - Send `keep_documents` on client delete and handle `409 client_has_documents`.
 2. **AuthAction dashboard.** Confirm the API resource audience
-   `revercue-api.samsaam470.workers.dev`, the callback URLs for `revercue.pages.dev` and local
-   development, and that passkeys/WhatsApp/Google are enabled for the `revercue` application.
-   The backend performs OIDC discovery; no client secret is used by the Worker.
+   `revercue-api.samsaam470.workers.dev`, the callback URLs for `revercue.co.uk`,
+   `revercue.pages.dev` and local development, and that passkeys/WhatsApp/Google are enabled
+   for the `revercue` application. The backend performs OIDC discovery; no client secret is
+   used by the Worker. Do not replace the audience with `api.revercue.co.uk`.
 3. **Credentials/configuration.** `B2_APP_KEY`, `TURSO_TOKEN`, `COOPER_API_KEY`,
    `OPENMAIL_API_KEY`, `ADMIN_JWT_KEY`, `ADMIN_PASS`, `SIGNING_LINK_SECRET`, `USER_JWT_KEY`
    must exist in the Worker; none were available here, so email/B2/Turso were not exercised.
@@ -422,6 +442,10 @@ signature" action.
 ---
 
 ## I. Test results (actual)
+
+> Post-release auth update: `npx tsc --noEmit` passed and `npx vitest run` passed
+> 99 tests across 13 files. The historical results below describe release 2.1
+> before the account-linking removal.
 
 ```
 $ npx tsc --noEmit

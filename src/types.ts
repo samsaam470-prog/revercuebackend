@@ -20,7 +20,11 @@ export interface Bindings {
   // ---------------------------------------------------------------------------
   /** Exact issuer from AuthAction's OIDC discovery document. */
   AUTHACTION_ISSUER?: string;
-  /** Exact API audience/identifier, e.g. "revercue-api.samsaam470.workers.dev". */
+  /**
+   * Exact API audience/identifier configured in AuthAction. This is not the
+   * public API hostname and must not be changed just because the Worker is also
+   * served from a custom domain.
+   */
   AUTHACTION_AUDIENCE?: string;
   /** Optional explicit JWKS URL; otherwise derived from OIDC discovery. */
   AUTHACTION_JWKS_URL?: string;
@@ -65,6 +69,8 @@ export interface Bindings {
   // Application configuration
   // ---------------------------------------------------------------------------
   FRONTEND_ORIGIN: string;
+  /** Canonical public API base URL (https://api.revercue.co.uk). */
+  API_BASE_URL?: string;
   /** Public app origin used for links in emails. Falls back to FRONTEND_ORIGIN. */
   APP_URL?: string;
   /** Comma separated additional allowed CORS origins (optional). */

@@ -215,7 +215,7 @@ forms.post('/:id/publish', async (c) => {
     documentId: row.id,
     title: `Form published: ${row.title}`,
   });
-  const base = (c.env.APP_URL || c.env.FRONTEND_ORIGIN || 'https://revercue.pages.dev').replace(/\/$/, '');
+  const base = (c.env.APP_URL || c.env.FRONTEND_ORIGIN || 'https://revercue.co.uk').replace(/\/$/, '');
   return c.json({ success: true, public_id: publicId, url: `${base}/f/${publicId}` });
 });
 

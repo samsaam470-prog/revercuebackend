@@ -78,6 +78,6 @@ export function documentLinkUrl(
   path: string,
   token: string
 ): string {
-  const base = (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.pages.dev').replace(/\/$/, '');
+  const base = (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.co.uk').replace(/\/$/, '');
   return `${base}${path}?token=${encodeURIComponent(token)}`;
 }

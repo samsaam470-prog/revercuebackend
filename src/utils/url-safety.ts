@@ -95,7 +95,7 @@ export async function safeFetchPublic(
       redirect: 'follow',
       signal: controller.signal,
       headers: {
-        'User-Agent': 'Revercue/2.0 (+https://revercue.pages.dev)',
+        'User-Agent': 'Revercue/2.0 (+https://revercue.co.uk)',
         Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.5',
         ...(options.headers ?? {}),
       },

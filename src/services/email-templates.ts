@@ -176,19 +176,3 @@ export function adminLeadEmail(input: {
   );
   return { subject, text, html };
 }
-
-export function linkCodeEmail(input: { code: string; email: string }): RenderedEmail {
-  const subject = 'Revercue — confirm linking your sign-in';
-  const text =
-    `Use this code to link your AuthAction sign-in to the Revercue account for ${input.email}:\n\n${input.code}\n\n` +
-    `It expires in 10 minutes and can be used once. If you did not request it, ignore this email and ` +
-    `contact support — someone may be trying to link your account.`;
-  const html = layout(
-    'Confirm linking your sign-in',
-    `<p>Use this code to link your AuthAction sign-in to the Revercue account for <strong>${escapeHtml(input.email)}</strong>:</p>` +
-      `<div style="font-family:monospace;font-size:34px;font-weight:600;color:#C9A961;letter-spacing:8px;background:#0A0A0A;border:1px solid #2A2A2A;border-radius:6px;padding:16px 24px;display:inline-block;">${escapeHtml(input.code)}</div>` +
-      `<p>It expires in 10 minutes and can be used once. If you did not request it, ignore this email and contact support.</p>`,
-    'Revercue — Your work should speak, not you.'
-  );
-  return { subject, text, html };
-}

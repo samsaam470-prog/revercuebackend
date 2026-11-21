@@ -50,5 +50,5 @@ source, responses or the frontend bundle.
 
 Until the table above is supplied, adding endpoints would require invented
 credentials or unverified assertions, so this repository intentionally does not
-fake the flow. Normal AuthAction sign-in and the existing account-link flow
+fake the flow. Normal AuthAction sign-in and direct AuthAction user provisioning
 remain unchanged.

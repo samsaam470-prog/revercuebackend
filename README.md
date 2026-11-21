@@ -8,12 +8,18 @@ The Revercue backend. Cloudflare Workers + Hono, Turso (auth + admin), D1 (produ
 - D1 (clients, documents, tracking, communication, expenses)
 - B2 (images, templates, proofs)
 - Cooper Email (primary) and OpenMail (fallback) for transactional email — FormSubmit is retired
-- AuthAction (OIDC/JWKS) for user authentication, with legacy JWT behind `ALLOW_LEGACY_AUTH`
+- Newsletter signup stores subscriber state; it does not send a confirmation or broadcast through Cooper/OpenMail
+- AuthAction (OIDC/JWKS) for user authentication, with direct, idempotent application-user provisioning
+- Legacy JWT remains behind `ALLOW_LEGACY_AUTH` for the transition only
 - JWT (admin, separate key)
 
 ## Environment variables
 See `docs/RELEASE_2.1.md` section E for the complete inventory (variables vs secrets).
 Nothing is hardcoded; secrets live in Worker settings, never in the repo.
+
+Canonical API base URL: `https://api.revercue.co.uk`.
+`AUTHACTION_AUDIENCE` intentionally remains the existing API resource identifier;
+it is not replaced by the custom hostname. See `docs/AUTH_ONBOARDING.md`.
 
 ## Checks
 ```bash
@@ -31,8 +37,12 @@ Both are additive and idempotent; back up first. Full release notes, API compati
 report and deployment checklist: `docs/RELEASE_2.1.md`.
 
 ## Routes
-- /api/auth — signup, login, google, verify, 2fa, password reset, logout, me
-- /api/onboarding — step 1, 2, 4, 5, tutorial
+- /api/auth — AuthAction session via `me`, legacy signup/login/google/verify/2fa/password reset, logout
+- /api/onboarding — step 1, 2, 4, 5, tutorial (authenticated, ownership-scoped)
+
+AuthAction users do not link accounts. `GET /api/auth/me` provisions the
+Revercue user on first use and returns onboarding state. Full contract:
+`docs/AUTH_ONBOARDING.md`.
 - /api/dashboard — summary, suggestions, activity
 - /api/proposals — CRUD, draft, publish, duplicate, archive, share, password, autosave
 - /api/contracts — same shape
@@ -49,6 +59,11 @@ report and deployment checklist: `docs/RELEASE_2.1.md`.
 
 ## Deploy
 Connected to GitHub. Every push to main triggers a deploy.
+
+Before deploying, confirm the Worker's `TURSO_URL` points at the database that
+actually contains `user_identities`; the old `no such table` error was an
+identity-database mismatch until proven otherwise. Do not run migrations without
+a backup and approval.
 
 ## Health
 GET /api/health → {"ok":true}

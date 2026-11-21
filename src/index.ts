@@ -31,10 +31,11 @@ app.use('*', async (c, next) => {
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
-  const allowed = [configured, ...extra].filter(Boolean);
-  // Only fall back to '*' when no origin is configured at all; credentials are
-  // never enabled, so bearer tokens remain the only credential mechanism.
-  const origin = allowed.length > 0 ? allowed : '*';
+  const allowed = [...new Set([configured, ...extra].filter(Boolean))];
+  // Never fall back to '*'. If no origin is configured, cross-origin browser
+  // requests receive no CORS permission; same-origin requests still work.
+  const origin = (requestOrigin: string) =>
+    allowed.includes(requestOrigin) ? requestOrigin : undefined;
   const corsMiddleware = cors({
     origin,
     allowHeaders: ['Content-Type', 'Authorization', 'X-Password-Session'],
@@ -63,6 +64,7 @@ app.get('/api/health', (c) =>
     status: 'healthy',
     version: '2.1.0',
     timestamp: new Date().toISOString(),
+    api_base_url: c.env.API_BASE_URL ?? 'https://api.revercue.co.uk',
     features: {
       authaction: Boolean(c.env.AUTHACTION_ISSUER && c.env.AUTHACTION_AUDIENCE),
       legacy_auth: (c.env.ALLOW_LEGACY_AUTH ?? 'true').toLowerCase() !== 'false',

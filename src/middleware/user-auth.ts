@@ -9,7 +9,12 @@ import {
   looksLikeAuthActionToken,
   verifyAccessToken,
 } from '../services/authaction';
-import { getUserById, resolveSubject, touchIdentityLogin } from '../services/identity';
+import {
+  getUserById,
+  IdentityStoreError,
+  resolveOrProvisionUser,
+  touchIdentityLogin,
+} from '../services/identity';
 
 /** Legacy app token payload. Retained for the AuthAction transition window. */
 export interface UserPayload {
@@ -42,7 +47,7 @@ export function getAuth(c: Context): AuthContext {
 }
 
 export interface AuthFailure {
-  status: 401 | 403 | 500;
+  status: 401 | 403 | 409 | 500 | 503;
   body: Record<string, unknown>;
 }
 
@@ -111,30 +116,53 @@ export async function authenticateRequest(
       };
     }
 
-    const user = await resolveSubject(env, identity.subject);
-    if (!user) {
+    let provisioned;
+    try {
+      provisioned = await resolveOrProvisionUser(env, {
+        subject: identity.subject,
+        email: identity.email,
+        emailVerified: identity.emailVerified,
+      });
+    } catch (error) {
+      if (error instanceof IdentityStoreError) {
+        console.error('IDENTITY_STORE_UNAVAILABLE', error.message);
+        return {
+          failure: {
+            status: 503,
+            body: {
+              error: 'identity_store_unavailable',
+              message: 'Authentication is temporarily unavailable. Try again shortly.',
+              details: { reason: 'identity_store_unavailable' },
+            },
+          },
+        };
+      }
+      throw error;
+    }
+
+    if (!provisioned.ok) {
+      const status =
+        provisioned.code === 'email_verification_required'
+          ? 403
+          : 409;
       return {
         failure: {
-          status: 401,
+          status,
           body: {
-            error: 'account_link_required',
-            message:
-              'This AuthAction identity is not linked to a Revercue account yet. Complete the account link flow.',
-            details: {
-              link_required: true,
-              email: identity.email,
-              email_verified: identity.emailVerified,
-            },
+            error: provisioned.code,
+            message: provisioned.message,
+            details: { reason: provisioned.code },
           },
         },
       };
     }
+
     await touchIdentityLogin(env, identity.subject);
     return {
       auth: {
-        userId: user.id,
-        email: user.email,
-        plan: user.plan,
+        userId: provisioned.user.id,
+        email: provisioned.user.email,
+        plan: provisioned.user.plan,
         role: 'user',
         via: 'authaction',
         subject: identity.subject,

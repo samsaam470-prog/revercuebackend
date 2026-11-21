@@ -33,7 +33,7 @@ const EVENT_SUBJECTS: Record<string, string> = {
 };
 
 function appUrl(env: Bindings): string {
-  return (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.pages.dev').replace(/\/$/, '');
+  return (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.co.uk').replace(/\/$/, '');
 }
 
 /**

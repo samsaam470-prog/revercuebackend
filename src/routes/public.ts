@@ -47,7 +47,7 @@ const TABLES: Record<DocType, string> = {
 };
 
 function appBase(env: Bindings): string {
-  return (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.pages.dev').replace(/\/$/, '');
+  return (env.APP_URL || env.FRONTEND_ORIGIN || 'https://revercue.co.uk').replace(/\/$/, '');
 }
 
 async function getUserPlan(env: Bindings, userId: string): Promise<string> {

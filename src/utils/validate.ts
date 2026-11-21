@@ -50,6 +50,7 @@ export const onboardingStep4Schema = z.object({
 
 export const onboardingStep5Schema = z.object({
   plan: z.enum(['free', 'waitlist']),
+  plan_requested: z.enum(['starter', 'growth', 'scale', 'teams']).optional().nullable(),
 });
 
 export const tutorialSchema = z.object({
