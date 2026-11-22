@@ -1,5 +1,6 @@
 import { tursoQuery, tursoExecute } from '../utils/turso';
 import { createNotification } from '../services/notifications';
+import { notifyAnnouncementAudience } from '../services/announcement-notify';
 import { deliverCampaign } from '../routes/admin';
 import type { Bindings } from '../types';
 
@@ -15,6 +16,11 @@ async function publishScheduledAnnouncements(env: Bindings): Promise<void> {
       env,
       `UPDATE announcements SET status = 'published', published_at = ?, updated_at = ? WHERE id = ?`,
       [now, now, r.id]
+    );
+    /* A scheduled publish is the same event as an admin one: the audience is
+       told, and a partial delivery is logged rather than left silent. */
+    await notifyAnnouncementAudience(env, String(r.id)).catch((e) =>
+      console.error('ANNOUNCEMENT_NOTIFY_FAILED', r.id, e)
     );
   }
 }
