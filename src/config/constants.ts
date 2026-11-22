@@ -62,7 +62,7 @@ export const NOTES_PER_CLIENT: Record<Plan, number> = {
 
 export const CUSTOM_TEMPLATE_LIMIT: Record<Plan, number> = {
   free: 0,
-  starter: 0,
+  starter: 3,
   growth: 10,
   scale: 15,
   teams: 15,
