@@ -10,6 +10,7 @@ import {
   tutorialSchema,
 } from '../utils/validate';
 import { jsonError } from '../utils/api-errors';
+import { contactEmail, PLACEHOLDER_EMAIL_LIKE } from '../utils/contact-email';
 import type { Bindings } from '../types';
 
 const onboarding = new Hono<{ Bindings: Bindings }>();
@@ -37,7 +38,9 @@ onboarding.patch('/step-1', async (c) => {
       `SELECT email FROM users WHERE id = ? LIMIT 1`,
       [auth.userId]
     );
-    const storedEmail = String(current.rows[0]?.email ?? '').trim();
+    // A placeholder address means AuthAction sent no email, so step 1 fills it
+    // in exactly like an empty value.
+    const storedEmail = contactEmail(current.rows[0]?.email);
     if (!storedEmail) {
       const taken = await tursoQuery(
         c.env,
@@ -49,8 +52,8 @@ onboarding.patch('/step-1', async (c) => {
       }
       await tursoExecute(
         c.env,
-        `UPDATE users SET email = ?, updated_at = ? WHERE id = ? AND (email IS NULL OR trim(email) = '')`,
-        [suppliedEmail, new Date().toISOString(), auth.userId]
+        `UPDATE users SET email = ?, updated_at = ? WHERE id = ? AND (email IS NULL OR trim(email) = '' OR email LIKE ?)`,
+        [suppliedEmail, new Date().toISOString(), auth.userId, PLACEHOLDER_EMAIL_LIKE]
       );
     }
   }

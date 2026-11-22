@@ -1,5 +1,6 @@
 import { tursoQuery, tursoExecute } from '../utils/turso';
 import { sha256Hex } from '../utils/crypto';
+import { contactEmail, PLACEHOLDER_EMAIL_LIKE, placeholderEmailFor } from '../utils/contact-email';
 import type { Bindings } from '../types';
 
 /**
@@ -85,7 +86,7 @@ async function identityExecute(env: Bindings, sql: string, args: unknown[] = [])
 function mapUser(row: any): RevercueUser {
   return {
     id: String(row.id),
-    email: String(row.email ?? ''),
+    email: contactEmail(row.email),
     plan: String(row.plan ?? 'free'),
     emailVerified: Number(row.email_verified) === 1 || row.email_verified === true,
   };
@@ -140,13 +141,19 @@ async function insertUserIfAbsent(
   input: { id: string; email: string; emailVerified: boolean }
 ): Promise<boolean> {
   const now = new Date().toISOString();
+  // AuthAction does not always release an email, and `users.email` is UNIQUE
+  // NOT NULL. Without an email a reserved, non-deliverable placeholder derived
+  // from this user's id is stored instead: unique per user, never shown and
+  // never emailed. Storing the same empty string for every account would make
+  // the second account without an email fail the unique constraint.
+  const storedEmail = input.email || placeholderEmailFor(input.id);
   const result = await identityQuery(
     env,
     `INSERT INTO users (id, email, plan, email_verified, onboarding_step, created_at, updated_at)
      VALUES (?, ?, 'free', ?, 1, ?, ?)
      ON CONFLICT(id) DO NOTHING
      RETURNING id`,
-    [input.id, input.email, input.emailVerified ? 1 : 0, now, now]
+    [input.id, storedEmail, input.emailVerified ? 1 : 0, now, now]
   );
   return result.rows.length > 0;
 }
@@ -187,6 +194,24 @@ async function markEmailVerified(env: Bindings, userId: string): Promise<void> {
   );
 }
 
+/**
+ * Replaces a placeholder address once AuthAction asserts a verified email. It
+ * never overwrites an address the user already supplied and never takes over an
+ * address another account holds. Failure is non-fatal: the sign-in still
+ * succeeds with "no email" and onboarding can collect one.
+ */
+async function adoptVerifiedEmail(env: Bindings, userId: string, email: string): Promise<void> {
+  try {
+    await tursoExecute(
+      env,
+      `UPDATE users SET email = ?, updated_at = ? WHERE id = ? AND (email IS NULL OR trim(email) = '' OR email LIKE ?)`,
+      [email, new Date().toISOString(), userId, PLACEHOLDER_EMAIL_LIKE]
+    );
+  } catch (error) {
+    console.error('IDENTITY_EMAIL_ADOPT_FAILED', error);
+  }
+}
+
 export async function touchIdentityLogin(env: Bindings, subject: string): Promise<void> {
   await tursoExecute(
     env,
@@ -223,13 +248,17 @@ export async function resolveOrProvisionUser(
   const existingIdentity = await findIdentity(env, subject);
   if (existingIdentity) {
     if (emailVerified) await markEmailVerified(env, existingIdentity.user_id);
-    const user = await getUserById(env, existingIdentity.user_id);
+    let user = await getUserById(env, existingIdentity.user_id);
     if (!user) {
       return {
         ok: false,
         code: 'identity_orphaned',
         message: 'This sign-in is attached to an application account that no longer exists.',
       };
+    }
+    if (emailVerified && email && !user.email) {
+      await adoptVerifiedEmail(env, user.id, email);
+      user = { ...user, email, emailVerified: true };
     }
     return { ok: true, user, created: false, linked_existing: false };
   }
@@ -324,7 +353,7 @@ export async function resolveOrProvisionUser(
   const winner = await findIdentity(env, subject);
   if (!winner) throw new IdentityStoreError('The identity mapping could not be read.');
   if (winner.user_id !== user.id) {
-    const winnerUser = await getUserById(env, winner.user_id);
+    let winnerUser = await getUserById(env, winner.user_id);
     if (!winnerUser) {
       return {
         ok: false,
@@ -333,6 +362,10 @@ export async function resolveOrProvisionUser(
       };
     }
     if (emailVerified) await markEmailVerified(env, winnerUser.id);
+    if (emailVerified && email && !winnerUser.email) {
+      await adoptVerifiedEmail(env, winnerUser.id, email);
+      winnerUser = { ...winnerUser, email, emailVerified: true };
+    }
     return { ok: true, user: winnerUser, created: false, linked_existing: false };
   }
 

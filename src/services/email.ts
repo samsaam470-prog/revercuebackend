@@ -2,6 +2,7 @@ import { tursoQuery, tursoExecute } from '../utils/turso';
 import { generateId } from '../utils/ids';
 import { EMAIL_BATCH_SIZE, EMAIL_MAX_ATTEMPTS } from '../config/constants';
 import { isTerminalStatus, nextAttemptAt, shouldRetry } from './email-retry';
+import { isPlaceholderEmail } from '../utils/contact-email';
 import type { Bindings } from '../types';
 
 /**
@@ -234,7 +235,9 @@ async function findDeliveryByKey(env: Bindings, key: string) {
 
 export async function sendEmail(env: Bindings, message: EmailMessage): Promise<EmailResult> {
   const to = normalizeEmail(message.to);
-  if (!isValidEmail(to)) {
+  // A user without an AuthAction email is stored under a reserved placeholder
+  // address; it is not a mailbox and must never be sent to.
+  if (!isValidEmail(to) || isPlaceholderEmail(to)) {
     return { ok: false, status: 'failed', error: 'invalid_recipient' };
   }
 

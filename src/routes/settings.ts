@@ -9,6 +9,7 @@ import { getPriceSuggestion } from '../services/price-suggestion';
 import { putObject } from '../services/storage';
 import { buildPdf, pdfResponse } from '../services/pdf-binary';
 import { jsonError } from '../utils/api-errors';
+import { contactEmail } from '../utils/contact-email';
 import {
   parseStoredPreferences,
   mergePreferences,
@@ -567,7 +568,7 @@ settings.get('/what-revercue-knows', async (c) => {
   const user = row.rows[0] ?? {};
   return c.json({
     account: [
-      { label: 'Email', value: String(user.email ?? '-') },
+      { label: 'Email', value: String(contactEmail(user.email) || '-') },
       { label: 'Name', value: String(user.name ?? '-') },
       { label: 'Business', value: String(user.business_name ?? '-') },
       { label: 'Plan', value: String(user.plan ?? 'free') },

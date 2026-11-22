@@ -227,6 +227,49 @@ describe('AuthAction provisioning', () => {
     expect(tursoState.users[0].email_verified).toBe(1);
   });
 
+  it('provisions two different subjects without an email without colliding', async () => {
+    // `users.email` is UNIQUE NOT NULL in production, so storing '' for every
+    // account without an email made the second sign-in fail provisioning.
+    tursoState.enforceUniqueEmail = true;
+    const first = await resolveOrProvisionUser(
+      env,
+      identity({ subject: 'authaction|no-email-a', email: null, emailVerified: true })
+    );
+    const second = await resolveOrProvisionUser(
+      env,
+      identity({ subject: 'authaction|no-email-b', email: null, emailVerified: true })
+    );
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.user.id).not.toBe(second.user.id);
+    expect(first.user.email).toBe('');
+    expect(second.user.email).toBe('');
+    expect(tursoState.users).toHaveLength(2);
+    const stored = tursoState.users.map((user) => user.email);
+    expect(new Set(stored).size).toBe(2);
+    expect(stored.every((email) => email.endsWith('@no-email.revercue.invalid'))).toBe(true);
+  });
+
+  it('fills the placeholder email once AuthAction asserts a verified one', async () => {
+    const first = await resolveOrProvisionUser(
+      env,
+      identity({ subject: 'authaction|late-email', email: null, emailVerified: true })
+    );
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.user.email).toBe('');
+
+    const second = await resolveOrProvisionUser(
+      env,
+      identity({ subject: 'authaction|late-email', email: 'Later@Example.com', emailVerified: true })
+    );
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.user.email).toBe('later@example.com');
+    expect(tursoState.users.find((user) => user.id === first.user.id)?.email).toBe('later@example.com');
+    expect(tursoState.users).toHaveLength(1);
+  });
+
   it('surfaces missing identity tables as an IdentityStoreError', async () => {
     tursoState.failIdentityRead = true;
     await expect(resolveOrProvisionUser(env, identity())).rejects.toBeInstanceOf(IdentityStoreError);

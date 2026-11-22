@@ -8,6 +8,7 @@ import { sendTransactionalEmail } from '../services/email';
 import { checkRateLimit } from '../services/rate-limit';
 import { userAuthMiddleware, getAuth } from '../middleware/user-auth';
 import { getOnboardingState } from '../services/onboarding';
+import { contactEmail } from '../utils/contact-email';
 import type { Bindings } from '../types';
 
 /**
@@ -129,13 +130,14 @@ auth.get('/me', userAuthMiddleware, async (c) => {
     );
   }
   const u = result.rows[0];
+  const accountEmail = contactEmail(u.email);
   const onboarding = getOnboardingState(u);
   return c.json({
     authenticated: true,
     user: {
       id: u.id,
-      email: u.email,
-      email_missing: !String(u.email ?? '').trim(),
+      email: accountEmail,
+      email_missing: !accountEmail,
       name: u.name,
       plan: u.plan,
       plan_expires_at: u.plan_expires_at ?? null,

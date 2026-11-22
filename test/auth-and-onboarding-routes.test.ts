@@ -278,7 +278,9 @@ describe('GET /api/auth/me and direct provisioning', () => {
     expect(step.status).toBe(409);
     expect((await step.json() as any).error).toBe('email_in_use');
     const own = tursoState.users.find((user) => user.id === body.user.id);
-    expect(own?.email).toBe('');
+    // No email was available from AuthAction, so the row keeps its reserved
+    // placeholder rather than taking another account's address.
+    expect(String(own?.email).endsWith('@no-email.revercue.invalid')).toBe(true);
   });
 
   it('will not overwrite the email AuthAction already provided', async () => {

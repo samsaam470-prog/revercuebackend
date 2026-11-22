@@ -164,6 +164,7 @@ export async function tursoQuery(
     ) {
       throw new Error('UNIQUE constraint failed: users.email');
     }
+    if (!email.trim()) throw new Error('NOT NULL constraint failed: users.email');
     tursoState.users.push({
       id,
       email,
@@ -219,7 +220,10 @@ export async function tursoQuery(
   if (statement.startsWith('UPDATE users SET email = ?, updated_at = ?')) {
     const [email, updatedAt, userId] = args.map(String);
     const row = tursoState.users.find((user) => user.id === userId);
-    if (row && !String(row.email ?? '').trim()) {
+    const current = String(row?.email ?? '').trim().toLowerCase();
+    // Mirrors the SQL guard: empty and placeholder addresses are both "no
+    // email yet" and may be filled in.
+    if (row && (!current || current.endsWith('@no-email.revercue.invalid'))) {
       row.email = email;
       row.updated_at = updatedAt;
     }
