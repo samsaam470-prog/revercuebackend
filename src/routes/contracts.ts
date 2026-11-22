@@ -59,7 +59,9 @@ function parseJson(value: unknown): any {
 /** Accepts both the builder's `content` object and flat draft fields. */
 function buildContent(body: any, existing?: any): any {
   const base = existing ? parseJson(existing) : {};
-  if (body.content && typeof body.content === 'object') return body.content;
+  // A builder save carries the page, the brief and the settings together; keep
+  // the stored clauses the save does not mention instead of dropping them.
+  if (body.content && typeof body.content === 'object') return { ...base, ...body.content };
   const merged = { ...base };
   for (const key of ['scope', 'payment_terms', 'timeline', 'revisions', 'cancellation', 'confidentiality', 'terms', 'currency', 'sections', 'blocks']) {
     if (body[key] !== undefined) merged[key] = body[key];
@@ -135,11 +137,30 @@ contracts.post('/draft', async (c) => {
 
 contracts.get('/:id', async (c) => {
   const auth = getAuth(c);
-  const contract = await dbFirst<any>(c.env, `SELECT * FROM contracts WHERE id = ? AND user_id = ?`, [
-    c.req.param('id'),
-    auth.userId,
-  ]);
+  const contract = await dbFirst<any>(
+    c.env,
+    `SELECT ct.*, cl.name AS client_name, cl.email AS client_email, cl.phone AS client_phone,
+            cl.industry AS industry, cl.website_url AS client_website
+     FROM contracts ct
+     LEFT JOIN clients cl ON cl.id = ct.client_id AND cl.user_id = ct.user_id
+     WHERE ct.id = ? AND ct.user_id = ?`,
+    [c.req.param('id'), auth.userId]
+  );
   if (!contract) return jsonError(c, 404, 'not_found', 'Contract not found.');
+
+  const content = parseJson(contract.content);
+  const brief = Object.fromEntries(
+    Object.entries({
+      scope: content.scope ?? undefined,
+      payment_terms: content.payment_terms ?? undefined,
+      timeline: content.timeline ?? undefined,
+      revisions: content.revisions ?? undefined,
+      cancellation: content.cancellation ?? undefined,
+      currency: content.currency ?? undefined,
+      sections: content.sections ?? undefined,
+      drafted: content.drafted === true,
+    }).filter(([, value]) => value !== undefined)
+  );
 
   const [signing, tracking] = await Promise.all([
     readSigningSummary(c.env, contract).catch((error) => {
@@ -149,7 +170,15 @@ contracts.get('/:id', async (c) => {
     getTrackingSummary(c.env, 'contract', contract.id),
   ]);
 
-  return c.json({ contract: { ...contract, signing, tracking } });
+  return c.json({
+    contract: {
+      ...contract,
+      ...brief,
+      content: { ...content, blocks: Array.isArray(content.blocks) ? content.blocks : [] },
+      signing,
+      tracking,
+    },
+  });
 });
 
 contracts.patch('/:id', async (c) => {

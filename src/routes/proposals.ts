@@ -148,30 +148,88 @@ proposals.post('/draft', async (c) => {
   return c.json({ success: true, id, status: 'draft', client_id: clientId }, 201);
 });
 
+/**
+ * The brief lives inside the `content` JSON, but the builders and the public
+ * page read it as columns. Return both shapes: the brief at the top level and
+ * `content` parsed rather than as a string, so the draft is never rebuilt from
+ * an empty brief.
+ */
+function readContent(value: unknown): any {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string' || !value) return {};
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
+/** A save carries the page, the brief and the settings together; never drop what it omits. */
+function mergeContent(existing: unknown, incoming: any): any {
+  const base = readContent(existing);
+  if (!incoming || typeof incoming !== 'object') return base;
+  return { ...base, ...incoming };
+}
+
+function proposalBrief(content: any) {
+  return {
+    problem: content.problem ?? undefined,
+    sections: content.sections ?? undefined,
+    packages: content.packages ?? undefined,
+    currency: content.currency ?? undefined,
+    timeline_length: content.timeline ?? undefined,
+    tone: content.tone ?? undefined,
+    faqs: content.faqs ?? undefined,
+    questions: content.questions ?? undefined,
+    cta: content.call_to_action ?? undefined,
+    target_audience: content.target_audience ?? undefined,
+    drafted: content.drafted === true,
+  };
+}
+
 proposals.get('/:id', async (c) => {
   const auth = getAuth(c);
-  const row = await dbFirst<any>(c.env, `SELECT * FROM proposals WHERE id = ? AND user_id = ?`, [
-    c.req.param('id'),
-    auth.userId,
-  ]);
+  const row = await dbFirst<any>(
+    c.env,
+    `SELECT p.*, cl.name AS client_name, cl.email AS client_email, cl.phone AS client_phone, cl.industry AS industry,
+            cl.target_audience AS client_target_audience, cl.website_url AS client_website
+     FROM proposals p
+     LEFT JOIN clients cl ON cl.id = p.client_id AND cl.user_id = p.user_id
+     WHERE p.id = ? AND p.user_id = ?`,
+    [c.req.param('id'), auth.userId]
+  );
   if (!row) return jsonError(c, 404, 'not_found', 'Proposal not found.');
+  const content = readContent(row.content);
   const tracking = await getTrackingSummary(c.env, 'proposal', row.id);
-  return c.json({ proposal: { ...row, tracking } });
+  const brief = Object.fromEntries(
+    Object.entries(proposalBrief(content)).filter(([, value]) => value !== undefined)
+  );
+  return c.json({
+    proposal: {
+      ...row,
+      ...brief,
+      industry: row.industry ?? undefined,
+      target_audience: brief.target_audience ?? row.target_audience ?? row.client_target_audience ?? undefined,
+      content: { ...content, blocks: Array.isArray(content.blocks) ? content.blocks : [] },
+      tracking,
+    },
+  });
 });
 
 proposals.patch('/:id', async (c) => {
   const auth = getAuth(c);
   const body = await c.req.json().catch(() => ({}));
-  const row = await dbFirst<any>(c.env, `SELECT id FROM proposals WHERE id = ? AND user_id = ?`, [
+  const row = await dbFirst<any>(c.env, `SELECT id, content FROM proposals WHERE id = ? AND user_id = ?`, [
     c.req.param('id'),
     auth.userId,
   ]);
   if (!row) return jsonError(c, 404, 'not_found', 'Proposal not found.');
   const now = new Date().toISOString();
+  const content = body.content ? mergeContent(row.content, body.content) : null;
   await dbRun(
     c.env,
     `UPDATE proposals SET title = COALESCE(?, title), content = COALESCE(?, content), updated_at = ? WHERE id = ? AND user_id = ?`,
-    [body.title ?? null, body.content ? JSON.stringify(body.content) : null, now, row.id, auth.userId]
+    [body.title ?? null, content ? JSON.stringify(content) : null, now, row.id, auth.userId]
   );
   return c.json({ success: true, updated_at: now });
 });
@@ -179,10 +237,15 @@ proposals.patch('/:id', async (c) => {
 proposals.post('/:id/autosave', async (c) => {
   const auth = getAuth(c);
   const b = await c.req.json().catch(() => ({}));
+  const row = await dbFirst<any>(c.env, `SELECT content FROM proposals WHERE id = ? AND user_id = ?`, [
+    c.req.param('id'),
+    auth.userId,
+  ]);
+  const content = b.content ? mergeContent(row?.content, b.content) : null;
   await dbRun(
     c.env,
     `UPDATE proposals SET content = COALESCE(?, content), updated_at = ? WHERE id = ? AND user_id = ?`,
-    [b.content ? JSON.stringify(b.content) : null, new Date().toISOString(), c.req.param('id'), auth.userId]
+    [content ? JSON.stringify(content) : null, new Date().toISOString(), c.req.param('id'), auth.userId]
   );
   return c.json({ success: true });
 });
