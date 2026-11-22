@@ -65,7 +65,7 @@ export const CUSTOM_TEMPLATE_LIMIT: Record<Plan, number> = {
   starter: 3,
   growth: 10,
   scale: 15,
-  teams: 15,
+  teams: 999,
 };
 
 export const SAVED_FAQ_LIMIT: Record<Plan, number> = {
@@ -73,7 +73,7 @@ export const SAVED_FAQ_LIMIT: Record<Plan, number> = {
   starter: 0,
   growth: 10,
   scale: 30,
-  teams: 30,
+  teams: 999,
 };
 
 export const SAVED_PACKAGE_LIMIT: Record<Plan, number> = {
@@ -81,7 +81,7 @@ export const SAVED_PACKAGE_LIMIT: Record<Plan, number> = {
   starter: 0,
   growth: 10,
   scale: 15,
-  teams: 15,
+  teams: 999,
 };
 
 export const PASSWORD_PROTECTED_LIMIT: Record<Plan, number> = {
@@ -89,7 +89,7 @@ export const PASSWORD_PROTECTED_LIMIT: Record<Plan, number> = {
   starter: 0,
   growth: 15,
   scale: 50,
-  teams: 50,
+  teams: 999,
 };
 
 export const ADAPTIVE_FORM_LIMIT: Record<Plan, number> = {
@@ -97,7 +97,7 @@ export const ADAPTIVE_FORM_LIMIT: Record<Plan, number> = {
   starter: 0,
   growth: 3,
   scale: 15,
-  teams: 999999,
+  teams: 999,
 };
 
 export const EMAIL_NOTIFICATIONS: Record<Plan, boolean> = {
