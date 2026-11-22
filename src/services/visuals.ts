@@ -5,6 +5,7 @@ export interface VisualRequest {
   type: 'image' | 'icon' | 'chart' | 'diagram' | 'svg';
   query: string;
   section_id?: string;
+  afterBlockId?: string;
   data?: any;
 }
 
@@ -23,32 +24,42 @@ export function validateRequests(requests: any[]): { valid: VisualRequest[]; rej
   const rejected: any[] = [];
   for (const r of requests) {
     if (!r || typeof r !== 'object') { rejected.push(r); continue; }
-    if (!['image', 'icon', 'chart', 'diagram', 'svg'].includes(r.type)) { rejected.push(r); continue; }
+    const type = r.type || r.kind;
+    if (!['image', 'icon', 'chart', 'diagram', 'svg'].includes(type)) { rejected.push(r); continue; }
     if (!r.query || typeof r.query !== 'string') { rejected.push(r); continue; }
-    valid.push({ type: r.type, query: String(r.query).slice(0, 200), section_id: r.section_id, data: r.data });
+    valid.push({ type, query: String(r.query).slice(0, 200), section_id: r.section_id || r.afterBlockId, afterBlockId: r.afterBlockId || r.section_id, data: r.data });
   }
   return { valid, rejected };
 }
 
-export async function resolveVisuals(env: Bindings, requests: any[]): Promise<{ assets: VisualAsset[]; rejected: any[] }> {
+export async function resolveVisuals(env: Bindings, requests: any[]): Promise<{ assets: Record<string, VisualAsset>; rejected: any[] }> {
   const { valid, rejected } = validateRequests(requests);
-  const assets: VisualAsset[] = [];
+  const assets: Record<string, VisualAsset> = {};
 
   const apiRequests = valid.filter((r) => r.type === 'image' || r.type === 'icon' || r.type === 'chart');
   if (apiRequests.length > 0) {
     const resolved = await fetchVisualAssets(env, apiRequests.map((r) => ({ type: r.type, query: r.query })));
-    for (const a of resolved) {
-      assets.push({ type: a.type, query: a.query, url: a.url, icon: a.icon });
+    // Map resolved assets back to their requests by index within apiRequests.
+    let ri = 0;
+    for (const r of apiRequests) {
+      const a = resolved[ri++];
+      if (!a) continue;
+      const key = r.section_id || r.afterBlockId || String(ri);
+      assets[key] = { type: a.type, query: a.query, url: a.url, icon: a.icon, section_id: r.section_id };
     }
   }
 
   for (const r of valid.filter((x) => x.type === 'diagram')) {
     const mermaid = buildMermaid(r.query, r.data);
-    if (mermaid) assets.push({ type: 'diagram', query: r.query, mermaid, section_id: r.section_id });
+    if (mermaid) {
+      const key = r.section_id || r.afterBlockId || r.query;
+      assets[key] = { type: 'diagram', query: r.query, mermaid, section_id: r.section_id };
+    }
   }
 
   for (const r of valid.filter((x) => x.type === 'chart' && x.data)) {
-    assets.push({ type: 'chart', query: r.query, echarts: r.data, section_id: r.section_id });
+    const key = r.section_id || r.afterBlockId || r.query;
+    assets[key] = { type: 'chart', query: r.query, echarts: r.data, section_id: r.section_id };
   }
 
   return { assets, rejected };
