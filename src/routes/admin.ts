@@ -528,6 +528,41 @@ admin.post('/email-deliveries/:id/retry', async (c) => {
 
 // --- Announcements (admin) -------------------------------------------------
 
+/**
+ * A published feature or maintenance announcement is also a notification event.
+ * Administrators should not have to create the same message twice; campaigns
+ * remain the place for scheduled, targeted sends. Best effort throughout: a
+ * notification failure never fails the announcement itself.
+ */
+async function notifyAnnouncementAudience(env: Bindings, announcementId: string): Promise<void> {
+  try {
+    const rows = await tursoQuery(env, `SELECT * FROM announcements WHERE id = ? LIMIT 1`, [announcementId]);
+    const ann: any = rows.rows[0];
+    if (!ann || ann.status !== 'published') return;
+    const type = String(ann.type ?? 'general');
+    if (!['feature', 'maintenance', 'important'].includes(type)) return;
+    const now = new Date().toISOString();
+    if (ann.starts_at && String(ann.starts_at) > now) return;
+    if (ann.expires_at && String(ann.expires_at) < now) return;
+    const userIds = await resolveTargetUsers(env, {
+      target_audience: ann.target_audience,
+      target_plans: ann.target_plans,
+    });
+    const eventType = type === 'maintenance' ? 'maintenance' : 'feature_release';
+    for (const userId of userIds) {
+      await createNotification(env, {
+        userId,
+        eventType,
+        title: String(ann.title),
+        body: ann.body ? String(ann.body) : null,
+        sendEmail: false,
+      }).catch(() => undefined);
+    }
+  } catch (error) {
+    console.error('ANNOUNCEMENT_NOTIFY_FAILED', announcementId, error);
+  }
+}
+
 admin.get('/announcements', async (c) => {
   const pagination = parsePagination(c, ADMIN_LIST_LIMIT);
   const status = c.req.query('status');
@@ -575,6 +610,7 @@ admin.post('/announcements', async (c) => {
     ]
   );
   await logAdminAction(c.env, { adminUser: requireAdminUser(c), action: 'announcement.created', targetType: 'announcement', targetId: id });
+  if (status === 'published') await notifyAnnouncementAudience(c.env, id);
   return c.json({ success: true, id }, 201);
 });
 
@@ -603,6 +639,9 @@ admin.patch('/announcements/:id', async (c) => {
   args.push(now, id);
   await tursoExecute(c.env, `UPDATE announcements SET ${fields.join(', ')} WHERE id = ?`, args);
   await logAdminAction(c.env, { adminUser: requireAdminUser(c), action: 'announcement.updated', targetType: 'announcement', targetId: id, metadata: b });
+  if (b.status === 'published' && existing.rows[0].status !== 'published') {
+    await notifyAnnouncementAudience(c.env, id);
+  }
   return c.json({ success: true });
 });
 

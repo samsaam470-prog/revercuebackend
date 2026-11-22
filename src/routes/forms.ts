@@ -322,6 +322,88 @@ forms.get('/:id/submissions', async (c) => {
   return c.json(paginated(submissions, Number(totalRow?.c ?? 0), pagination));
 });
 
+/** Markdown rendering of one answer value: strings stay as written. */
+function answerToMarkdown(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '_Not answered._';
+  if (Array.isArray(value)) return value.map((item) => answerToMarkdown(item)).join(', ');
+  if (typeof value === 'object') return '`' + JSON.stringify(value) + '`';
+  return String(value);
+}
+
+function submissionToMarkdown(
+  title: string,
+  submission: any,
+  answers: Record<string, unknown>
+): string {
+  const lines: string[] = [`# ${title} — requirement answers`, ''];
+  lines.push(`- Submitted: ${submission.created_at}`);
+  if (submission.service_type) lines.push(`- Service: ${submission.service_type}`);
+  lines.push(`- Status: ${submission.status}`, '', '## Answers', '');
+  const entries = Object.entries(answers);
+  if (entries.length === 0) {
+    lines.push('_No answers were recorded._');
+  } else {
+    for (const [key, value] of entries) {
+      lines.push(`### ${key}`, '', answerToMarkdown(value), '');
+    }
+  }
+  if (submission.generated_prompt) {
+    lines.push('## Assembled brief', '', String(submission.generated_prompt), '');
+  }
+  return lines.join('\n');
+}
+
+function markdownResponse(body: string, filename: string): Response {
+  return new Response(body, {
+    headers: {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    },
+  });
+}
+
+forms.get('/:id/submissions/export.md', async (c) => {
+  const auth = getAuth(c);
+  const form = await dbFirst<any>(c.env, `SELECT id, title FROM forms WHERE id = ? AND user_id = ?`, [
+    c.req.param('id'),
+    auth.userId,
+  ]);
+  if (!form) return jsonError(c, 404, 'not_found', 'Form not found.');
+  const rows = await dbQuery<any>(
+    c.env,
+    `SELECT * FROM form_submissions WHERE form_id = ? AND user_id = ? ORDER BY created_at ASC`,
+    [form.id, auth.userId]
+  );
+  const body = rows
+    .map((row, index) =>
+      submissionToMarkdown(
+        `${form.title || 'Form'} (${index + 1} of ${rows.length})`,
+        row,
+        parseJson(row.answers)
+      )
+    )
+    .join('\n---\n\n');
+  return markdownResponse(
+    body || `# ${form.title || 'Form'}\n\n_No submissions yet._\n`,
+    `form-${form.id}-answers.md`
+  );
+});
+
+forms.get('/:id/submissions/:submissionId.md', async (c) => {
+  const auth = getAuth(c);
+  const form = await dbFirst<any>(c.env, `SELECT id, title FROM forms WHERE id = ? AND user_id = ?`, [
+    c.req.param('id'),
+    auth.userId,
+  ]);
+  if (!form) return jsonError(c, 404, 'not_found', 'Form not found.');
+  const submission = await getSubmission(c.env, form.id, String(c.req.param('submissionId') ?? ''), auth.userId);
+  if (!submission) return jsonError(c, 404, 'not_found', 'Submission not found.');
+  return markdownResponse(
+    submissionToMarkdown(form.title || 'Form', submission, parseJson(submission.answers)),
+    `submission-${submission.id}.md`
+  );
+});
+
 forms.get('/:id/submissions/:submissionId', async (c) => {
   const auth = getAuth(c);
   const submission = await getSubmission(c.env, c.req.param('id'), c.req.param('submissionId'), auth.userId);

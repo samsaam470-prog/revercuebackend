@@ -62,6 +62,9 @@ const EVENT_TO_FIELD: Record<string, keyof NotificationPreferences> = {
   invoice_proof_submitted: 'proof_uploaded',
   retention_warning: 'email_enabled',
   system_summary_ready: 'email_enabled',
+  payment_failed: 'email_enabled',
+  feature_release: 'email_enabled',
+  maintenance: 'email_enabled',
 };
 
 export function parseStoredPreferences(row: {

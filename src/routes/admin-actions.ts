@@ -75,7 +75,18 @@ adminActions.post('/payments', async (c) => {
   const b = await c.req.json();
   if (!b.user_id || !b.amount) return c.json({ error: 'invalid_payload' }, 400);
   const id = generateId('pay');
-  await tursoExecute(c.env, `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at) VALUES (?, ?, ?, ?, ?, 'payoneer', ?, ?, ?, ?)`, [id, b.user_id, b.plan ?? null, b.amount, b.currency ?? 'USD', b.reference ?? null, b.status ?? 'paid', b.paid_at ?? new Date().toISOString(), new Date().toISOString()]);
+  const status = String(b.status ?? 'paid');
+  await tursoExecute(c.env, `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at) VALUES (?, ?, ?, ?, ?, 'payoneer', ?, ?, ?, ?)`, [id, b.user_id, b.plan ?? null, b.amount, b.currency ?? 'USD', b.reference ?? null, status, b.paid_at ?? new Date().toISOString(), new Date().toISOString()]);
+  /* A recorded failure is something the customer must act on, so the account
+     owner is told. Best effort: the admin action has already been saved. */
+  if (status === 'failed') {
+    createNotification(c.env, {
+      userId: b.user_id,
+      eventType: 'payment_failed',
+      title: 'Payment could not be completed',
+      body: `A payment of ${b.amount} ${b.currency ?? 'USD'} did not go through. Update your payment method or contact support@revercue.co.uk.`,
+    }).catch(() => undefined);
+  }
   return c.json({ success: true, id }, 201);
 });
 

@@ -145,16 +145,65 @@ crm.get('/clients/:id', async (c) => {
   ]);
   if (!client) return jsonError(c, 404, 'not_found', 'Client not found.');
 
-  const [communication, notes, proposals, contracts, invoices, forms] = await Promise.all([
+  const [communication, notes, proposals, contracts, invoices, forms, requirements] = await Promise.all([
     dbQuery(c.env, `SELECT * FROM communication_log WHERE user_id = ? AND client_id = ? ORDER BY created_at DESC LIMIT 100`, [auth.userId, c.req.param('id')]),
     dbQuery(c.env, `SELECT * FROM client_notes WHERE client_id = ? AND user_id = ? ORDER BY created_at DESC`, [c.req.param('id'), auth.userId]),
     dbQuery(c.env, `SELECT id, title, status, public_id FROM proposals WHERE client_id = ? AND user_id = ?`, [c.req.param('id'), auth.userId]),
     dbQuery(c.env, `SELECT id, title, status, public_id FROM contracts WHERE client_id = ? AND user_id = ?`, [c.req.param('id'), auth.userId]),
     dbQuery(c.env, `SELECT id, invoice_number, status, total, currency, public_id FROM invoices WHERE client_id = ? AND user_id = ?`, [c.req.param('id'), auth.userId]),
     dbQuery(c.env, `SELECT id, title, status, public_id FROM forms WHERE client_id = ? AND user_id = ?`, [c.req.param('id'), auth.userId]),
+    dbQuery(
+      c.env,
+      `SELECT fs.id, fs.form_id, f.title AS form_title, f.questions AS form_questions, fs.answers, fs.service_type, fs.status, fs.created_at
+       FROM form_submissions fs
+       JOIN forms f ON f.id = fs.form_id AND f.user_id = fs.user_id
+       WHERE fs.user_id = ? AND (fs.client_id = ? OR f.client_id = ?)
+       ORDER BY fs.created_at DESC LIMIT 20`,
+      [auth.userId, c.req.param('id'), c.req.param('id')]
+    ),
   ]);
 
-  return c.json({ client, communication, notes, documents: { proposals, contracts, invoices, forms } });
+  /* The client's requirement answers are part of the record: they are the
+     structured data every later document is built from. Answer keys are
+     question ids, so they are relabelled with the question text the client
+     actually saw. */
+  const parsedRequirements = requirements.map((row: any) => {
+    const { form_questions, ...rest } = row;
+    let labels: Record<string, string> = {};
+    try {
+      const questions = typeof form_questions === 'string' ? JSON.parse(form_questions) : form_questions;
+      if (Array.isArray(questions)) {
+        for (const question of questions) {
+          if (question && question.id) {
+            labels[String(question.id)] = String(question.label ?? question.question ?? question.title ?? question.id);
+          }
+        }
+      }
+    } catch {
+      labels = {};
+    }
+    let answers: unknown = {};
+    try {
+      answers = typeof row.answers === 'string' ? JSON.parse(row.answers) : row.answers;
+    } catch {
+      answers = {};
+    }
+    const labelled: Record<string, unknown> = {};
+    if (answers && typeof answers === 'object' && !Array.isArray(answers)) {
+      for (const [key, value] of Object.entries(answers as Record<string, unknown>)) {
+        labelled[labels[key] ?? key] = value;
+      }
+    }
+    return { ...rest, answers: labelled };
+  });
+
+  return c.json({
+    client,
+    communication,
+    notes,
+    documents: { proposals, contracts, invoices, forms },
+    requirements: parsedRequirements,
+  });
 });
 
 crm.patch('/clients/:id', async (c) => {
