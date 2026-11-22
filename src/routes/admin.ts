@@ -8,6 +8,9 @@ import { parsePagination, paginated } from '../utils/pagination';
 import { jsonError } from '../utils/api-errors';
 import { clientIp } from '../utils/http';
 import { logAdminAction, requireAdminUser } from '../services/admin-audit';
+import { createNotification } from '../services/notifications';
+import { runAuthActionSync, getLastSyncStatus, getIdentityCounts } from '../services/authaction-sync';
+import { getManagementUser } from '../services/authaction-management';
 import { listRetentionFailures } from '../services/retention';
 import { retryDeliveryById } from '../services/email';
 import { NEWSLETTER_EXPORT_LIMIT, ADMIN_LIST_LIMIT } from '../config/constants';
@@ -134,7 +137,7 @@ admin.get('/users/:id', async (c) => {
               (SELECT COUNT(*) FROM forms WHERE user_id = ?) as forms,
               (SELECT COUNT(*) FROM invoices WHERE user_id = ?) as invoices`,
       [c.req.param('id'), c.req.param('id'), c.req.param('id'), c.req.param('id')]
-    ),
+    ).catch(() => ({ proposals: 0, contracts: 0, forms: 0, invoices: 0 })),
   ]);
   return c.json({
     user,
@@ -144,6 +147,113 @@ admin.get('/users/:id', async (c) => {
     identities: identities.rows,
     documents: documents ?? { proposals: 0, contracts: 0, forms: 0, invoices: 0 },
   });
+});
+
+// --- AuthAction identity directory -----------------------------------------
+
+admin.get('/identities/sync-status', async (c) => {
+  const [status, counts] = await Promise.all([getLastSyncStatus(c.env), getIdentityCounts(c.env)]);
+  return c.json({ sync: status, counts });
+});
+
+admin.post('/identities/sync', async (c) => {
+  // Avoid overlapping runs: if a run is currently 'running', return its status.
+  const last = await getLastSyncStatus(c.env);
+  if (last && last.status === 'running') {
+    return c.json({ success: false, message: 'A sync is already running.', run: last }, 409);
+  }
+  const result = await runAuthActionSync(c.env, requireAdminUser(c));
+  await logAdminAction(c.env, {
+    adminUser: requireAdminUser(c),
+    action: 'authaction.sync',
+    metadata: { status: result.status, totalFetched: result.totalFetched, upserted: result.upserted },
+    ip: clientIp(c),
+  });
+  return c.json({ success: result.status === 'success', ...result });
+});
+
+admin.get('/identities', async (c) => {
+  const pagination = parsePagination(c, ADMIN_LIST_LIMIT);
+  const search = (c.req.query('search') ?? '').slice(0, 100);
+  const status = c.req.query('status'); // linked | unlinked | onboarding_incomplete | blocked
+  const plan = c.req.query('plan');
+  const linked = c.req.query('linked'); // 'true' | 'false'
+
+  const conds: string[] = [];
+  const args: any[] = [];
+  if (search) {
+    conds.push(`(a.email LIKE ? OR COALESCE(a.name,'') LIKE ? OR a.id LIKE ?)`);
+    args.push(`%${search}%`, `%${search}%`, `%${search}%`);
+  }
+  if (linked === 'true') conds.push(`a.linked_user_id IS NOT NULL`);
+  else if (linked === 'false') conds.push(`a.linked_user_id IS NULL`);
+  if (status === 'linked') conds.push(`a.linked_user_id IS NOT NULL`);
+  else if (status === 'unlinked') conds.push(`a.linked_user_id IS NULL`);
+  else if (status === 'blocked') conds.push(`a.is_blocked = 1`);
+  if (status === 'onboarding_incomplete') {
+    conds.push(`a.linked_user_id IN (SELECT id FROM users WHERE COALESCE(onboarding_step,0) > 0 AND COALESCE(onboarding_step,0) < 6)`);
+  }
+  if (plan) {
+    conds.push(`a.linked_user_id IN (SELECT id FROM users WHERE plan = ?)`);
+    args.push(plan);
+  }
+  const where = conds.length ? conds.join(' AND ') : '1 = 1';
+
+  const total = await tursoQuery(c.env, `SELECT COUNT(*) as c FROM authaction_identities a WHERE ${where}`, args);
+  const rows = await tursoQuery(
+    c.env,
+    `SELECT a.*, u.plan as user_plan, u.onboarding_step as user_onboarding_step, u.email as user_email
+     FROM authaction_identities a
+     LEFT JOIN users u ON u.id = a.linked_user_id
+     WHERE ${where}
+     ORDER BY a.authaction_created_at DESC, a.synced_at DESC LIMIT ? OFFSET ?`,
+    [...args, pagination.limit, pagination.offset]
+  );
+  return c.json(paginated(rows.rows, Number(total.rows[0]?.c ?? 0), pagination));
+});
+
+admin.get('/identities/:id', async (c) => {
+  const id = c.req.param('id');
+  const rows = await tursoQuery(c.env, `SELECT * FROM authaction_identities WHERE id = ? LIMIT 1`, [id]);
+  if (rows.rows.length === 0) {
+    // Fall back to live fetch from AuthAction.
+    const live = await getManagementUser(c.env, id).catch(() => null);
+    if (!live) return jsonError(c, 404, 'not_found', 'Identity not found.');
+    return c.json({ identity: live, linked_user: null, payments: [], feedback: [], notes: [], documents: { proposals: 0, contracts: 0, forms: 0, invoices: 0 } });
+  }
+  const identity = rows.rows[0];
+  const linkedUserId = identity.linked_user_id;
+  let linkedUser: any = null;
+  let payments: any[] = [];
+  let feedback: any[] = [];
+  let notes: any[] = [];
+  let documents = { proposals: 0, contracts: 0, forms: 0, invoices: 0 };
+  let onboarding = null;
+  if (linkedUserId) {
+    const u = await tursoQuery(c.env, `SELECT * FROM users WHERE id = ? LIMIT 1`, [linkedUserId]);
+    if (u.rows.length > 0) {
+      const { password_hash, ...user } = u.rows[0] as any;
+      linkedUser = user;
+      const [p, f, n, d] = await Promise.all([
+        tursoQuery(c.env, `SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC`, [linkedUserId]),
+        tursoQuery(c.env, `SELECT * FROM feedback WHERE user_id = ?`, [linkedUserId]),
+        tursoQuery(c.env, `SELECT * FROM admin_notes WHERE target_type = 'user' AND target_id = ?`, [linkedUserId]),
+        dbFirst<{ proposals: number; contracts: number; forms: number; invoices: number }>(
+          c.env,
+          `SELECT (SELECT COUNT(*) FROM proposals WHERE user_id = ?) as proposals,
+                  (SELECT COUNT(*) FROM contracts WHERE user_id = ?) as contracts,
+                  (SELECT COUNT(*) FROM forms WHERE user_id = ?) as forms,
+                  (SELECT COUNT(*) FROM invoices WHERE user_id = ?) as invoices`,
+          [linkedUserId, linkedUserId, linkedUserId, linkedUserId]
+        ).catch(() => ({ proposals: 0, contracts: 0, forms: 0, invoices: 0 })),
+      ]);
+      payments = p.rows;
+      feedback = f.rows;
+      notes = n.rows;
+      documents = d ?? documents;
+    }
+  }
+  return c.json({ identity, linked_user: linkedUser, payments, feedback, notes, documents, onboarding });
 });
 
 admin.patch('/users/:id/plan', async (c) => {
@@ -176,6 +286,12 @@ admin.patch('/users/:id/plan', async (c) => {
       ]
     );
   }
+  createNotification(c.env, {
+    userId: c.req.param('id'),
+    eventType: 'subscription_activated',
+    title: 'Subscription updated',
+    body: `Your plan has been updated to ${body.plan}.`,
+  }).catch(() => undefined);
   await logAdminAction(c.env, {
     adminUser: requireAdminUser(c),
     action: 'user.plan_changed',
@@ -408,6 +524,278 @@ admin.post('/email-deliveries/:id/retry', async (c) => {
   });
   if (result.status === 'not_found') return jsonError(c, 404, 'not_found', 'Delivery not found.');
   return c.json({ success: result.ok, status: result.status, error: result.error ?? null });
+});
+
+// --- Announcements (admin) -------------------------------------------------
+
+admin.get('/announcements', async (c) => {
+  const pagination = parsePagination(c, ADMIN_LIST_LIMIT);
+  const status = c.req.query('status');
+  let where = '1 = 1';
+  const args: any[] = [];
+  if (status && ['draft', 'scheduled', 'published', 'archived'].includes(status)) {
+    where += ' AND status = ?';
+    args.push(status);
+  }
+  const total = await tursoQuery(c.env, `SELECT COUNT(*) as c FROM announcements WHERE ${where}`, args);
+  const rows = await tursoQuery(
+    c.env,
+    `SELECT * FROM announcements WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    [...args, pagination.limit, pagination.offset]
+  );
+  return c.json(paginated(rows.rows, Number(total.rows[0]?.c ?? 0), pagination));
+});
+
+admin.post('/announcements', async (c) => {
+  const b = await c.req.json().catch(() => ({}));
+  if (!b.title || !b.body) return jsonError(c, 400, 'invalid_payload', 'title and body are required.');
+  const id = generateId('ann');
+  const now = new Date().toISOString();
+  const status = b.status && ['draft', 'scheduled', 'published', 'archived'].includes(b.status) ? b.status : 'draft';
+  await tursoExecute(
+    c.env,
+    `INSERT INTO announcements (id, title, body, type, image_url, link_url, target_audience, target_plans, status, starts_at, expires_at, created_by, published_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      String(b.title).slice(0, 300),
+      String(b.body),
+      b.type && ['general', 'update', 'feature', 'maintenance', 'important'].includes(b.type) ? b.type : 'general',
+      b.image_url ?? null,
+      b.link_url ?? null,
+      b.target_audience ?? 'all',
+      b.target_plans ? JSON.stringify(b.target_plans) : null,
+      status,
+      b.starts_at ?? null,
+      b.expires_at ?? null,
+      requireAdminUser(c),
+      status === 'published' ? now : null,
+      now,
+      now,
+    ]
+  );
+  await logAdminAction(c.env, { adminUser: requireAdminUser(c), action: 'announcement.created', targetType: 'announcement', targetId: id });
+  return c.json({ success: true, id }, 201);
+});
+
+admin.patch('/announcements/:id', async (c) => {
+  const b = await c.req.json().catch(() => ({}));
+  const id = c.req.param('id');
+  const existing = await tursoQuery(c.env, `SELECT id, status FROM announcements WHERE id = ? LIMIT 1`, [id]);
+  if (existing.rows.length === 0) return jsonError(c, 404, 'not_found', 'Announcement not found.');
+  const now = new Date().toISOString();
+  const fields: string[] = [];
+  const args: any[] = [];
+  const updatable = ['title', 'body', 'type', 'image_url', 'link_url', 'target_audience', 'target_plans', 'starts_at', 'expires_at', 'status'];
+  for (const key of updatable) {
+    if (b[key] !== undefined) {
+      fields.push(`${key} = ?`);
+      if (key === 'target_plans') args.push(b[key] ? JSON.stringify(b[key]) : null);
+      else args.push(b[key]);
+    }
+  }
+  if (b.status === 'published' && existing.rows[0].status !== 'published') {
+    fields.push('published_at = ?');
+    args.push(now);
+  }
+  if (fields.length === 0) return c.json({ success: true });
+  fields.push('updated_at = ?');
+  args.push(now, id);
+  await tursoExecute(c.env, `UPDATE announcements SET ${fields.join(', ')} WHERE id = ?`, args);
+  await logAdminAction(c.env, { adminUser: requireAdminUser(c), action: 'announcement.updated', targetType: 'announcement', targetId: id, metadata: b });
+  return c.json({ success: true });
+});
+
+admin.delete('/announcements/:id', async (c) => {
+  const id = c.req.param('id');
+  await tursoExecute(c.env, `UPDATE announcements SET status = 'archived', updated_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
+  await logAdminAction(c.env, { adminUser: requireAdminUser(c), action: 'announcement.archived', targetType: 'announcement', targetId: id });
+  return c.json({ success: true });
+});
+
+// --- Admin notifications (campaigns) ---------------------------------------
+
+admin.get('/notifications', async (c) => {
+  const pagination = parsePagination(c, ADMIN_LIST_LIMIT);
+  const status = c.req.query('status');
+  let where = '1 = 1';
+  const args: any[] = [];
+  if (status && ['draft', 'scheduled', 'sent', 'cancelled'].includes(status)) {
+    where += ' AND status = ?';
+    args.push(status);
+  }
+  const total = await tursoQuery(c.env, `SELECT COUNT(*) as c FROM admin_notification_campaigns WHERE ${where}`, args);
+  const rows = await tursoQuery(
+    c.env,
+    `SELECT * FROM admin_notification_campaigns WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    [...args, pagination.limit, pagination.offset]
+  );
+  return c.json(paginated(rows.rows, Number(total.rows[0]?.c ?? 0), pagination));
+});
+
+async function resolveTargetUsers(env: Bindings, campaign: any): Promise<string[]> {
+  const audience = campaign.target_audience ?? 'all';
+  if (audience === 'specific' && campaign.target_user_ids) {
+    try { return JSON.parse(campaign.target_user_ids); } catch { return []; }
+  }
+  let sql = `SELECT id FROM users`;
+  const args: any[] = [];
+  const conds: string[] = [];
+  if (audience === 'free') { conds.push(`plan = 'free'`); }
+  else if (audience === 'paid') { conds.push(`plan IN ('starter','growth','scale','teams')`); }
+  else if (audience === 'active_subscribers') { conds.push(`plan IN ('starter','growth','scale','teams')`); }
+  if (campaign.target_plans) {
+    try {
+      const plans = JSON.parse(campaign.target_plans);
+      if (Array.isArray(plans) && plans.length) {
+        conds.push(`plan IN (${plans.map(() => '?').join(',')})`);
+        args.push(...plans);
+      }
+    } catch {}
+  }
+  if (conds.length) sql += ` WHERE ${conds.join(' AND ')}`;
+  const rows = await tursoQuery(env, sql, args);
+  return rows.rows.map((r: any) => String(r.id));
+}
+
+admin.post('/notifications', async (c) => {
+  const b = await c.req.json().catch(() => ({}));
+  if (!b.title) return jsonError(c, 400, 'invalid_payload', 'title is required.');
+  const id = generateId('anc');
+  const now = new Date().toISOString();
+  const status = b.scheduled_at ? 'scheduled' : (b.send_now === false ? 'draft' : 'sent');
+  await tursoExecute(
+    c.env,
+    `INSERT INTO admin_notification_campaigns (id, title, body, category, target_audience, target_plans, target_user_ids, scheduled_at, status, created_by, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id,
+      String(b.title).slice(0, 300),
+      b.body ?? null,
+      b.category ?? 'general',
+      b.target_audience ?? 'all',
+      b.target_plans ? JSON.stringify(b.target_plans) : null,
+      b.target_user_ids ? JSON.stringify(b.target_user_ids) : null,
+      b.scheduled_at ?? null,
+      status,
+      requireAdminUser(c),
+      now,
+      now,
+    ]
+  );
+
+  // If sending now, deliver immediately.
+  if (status === 'sent') {
+    await deliverCampaign(c.env, id);
+  }
+  await logAdminAction(c.env, { adminUser: requireAdminUser(c), action: 'notification.created', targetType: 'admin_notification', targetId: id, metadata: { status } });
+  return c.json({ success: true, id, status }, 201);
+});
+
+async function deliverCampaign(env: Bindings, campaignId: string): Promise<void> {
+  const rows = await tursoQuery(env, `SELECT * FROM admin_notification_campaigns WHERE id = ? LIMIT 1`, [campaignId]);
+  if (rows.rows.length === 0) return;
+  const campaign = rows.rows[0];
+  const userIds = await resolveTargetUsers(env, campaign);
+  const now = new Date().toISOString();
+  let sent = 0;
+  let failed = 0;
+  for (const userId of userIds) {
+    const deliveryId = generateId('and');
+    try {
+      const notifId = await (async () => {
+        const nid = generateId('notif');
+        await tursoExecute(
+          env,
+          `INSERT INTO notifications (id, user_id, event_type, client_id, document_id, title, body, read, dismissed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+          [nid, userId, `admin:${campaign.category ?? 'general'}`, null, null, campaign.title, campaign.body ?? null, now]
+        );
+        return nid;
+      })();
+      await tursoExecute(
+        env,
+        `INSERT INTO admin_notification_deliveries (id, campaign_id, user_id, notification_id, status, attempts, delivered_at, created_at) VALUES (?, ?, ?, ?, 'sent', 1, ?, ?)`,
+        [deliveryId, campaignId, userId, notifId, now, now]
+      );
+      sent += 1;
+    } catch (e: any) {
+      await tursoExecute(
+        env,
+        `INSERT INTO admin_notification_deliveries (id, campaign_id, user_id, notification_id, status, attempts, last_error, created_at) VALUES (?, ?, ?, NULL, 'failed', 1, ?, ?)`,
+        [deliveryId, campaignId, userId, String(e?.message ?? e).slice(0, 500), now]
+      ).catch(() => undefined);
+      failed += 1;
+    }
+  }
+  await tursoExecute(
+    env,
+    `UPDATE admin_notification_campaigns SET status = 'sent', published_at = COALESCE(published_at, ?), delivery_total = ?, delivery_sent = ?, delivery_failed = ?, updated_at = ? WHERE id = ?`,
+    [now, userIds.length, sent, failed, now, campaignId]
+  );
+}
+
+admin.post('/notifications/:id/send', async (c) => {
+  const id = c.req.param('id');
+  await deliverCampaign(c.env, id);
+  await logAdminAction(c.env, { adminUser: requireAdminUser(c), action: 'notification.sent', targetType: 'admin_notification', targetId: id });
+  return c.json({ success: true });
+});
+
+admin.post('/notifications/:id/retry', async (c) => {
+  // Retry failed deliveries for a campaign.
+  const id = c.req.param('id');
+  const failed = await tursoQuery(c.env, `SELECT * FROM admin_notification_deliveries WHERE campaign_id = ? AND status = 'failed'`, [id]);
+  const campaignRows = await tursoQuery(c.env, `SELECT * FROM admin_notification_campaigns WHERE id = ? LIMIT 1`, [id]);
+  if (campaignRows.rows.length === 0) return jsonError(c, 404, 'not_found', 'Campaign not found.');
+  const campaign = campaignRows.rows[0];
+  const now = new Date().toISOString();
+  let retried = 0;
+  for (const d of failed.rows) {
+    const deliveryId = generateId('and');
+    try {
+      const nid = generateId('notif');
+      await tursoExecute(
+        c.env,
+        `INSERT INTO notifications (id, user_id, event_type, title, body, read, dismissed, created_at) VALUES (?, ?, ?, ?, ?, 0, 0, ?)`,
+        [nid, d.user_id, `admin:${campaign.category ?? 'general'}`, campaign.title, campaign.body ?? null, now]
+      );
+      await tursoExecute(
+        c.env,
+        `UPDATE admin_notification_deliveries SET status = 'sent', notification_id = ?, delivered_at = ?, attempts = attempts + 1, last_error = NULL WHERE id = ?`,
+        [nid, now, d.id]
+      );
+      retried += 1;
+    } catch (e: any) {
+      await tursoExecute(
+        c.env,
+        `UPDATE admin_notification_deliveries SET attempts = attempts + 1, last_error = ? WHERE id = ?`,
+        [String(e?.message ?? e).slice(0, 500), d.id]
+      ).catch(() => undefined);
+    }
+  }
+  await logAdminAction(c.env, { adminUser: requireAdminUser(c), action: 'notification.retried', targetType: 'admin_notification', targetId: id, metadata: { retried } });
+  return c.json({ success: true, retried });
+});
+
+admin.post('/notifications/:id/cancel', async (c) => {
+  const id = c.req.param('id');
+  await tursoExecute(c.env, `UPDATE admin_notification_campaigns SET status = 'cancelled', updated_at = ? WHERE id = ?`, [new Date().toISOString(), id]);
+  await logAdminAction(c.env, { adminUser: requireAdminUser(c), action: 'notification.cancelled', targetType: 'admin_notification', targetId: id });
+  return c.json({ success: true });
+});
+
+admin.get('/notifications/:id', async (c) => {
+  const id = c.req.param('id');
+  const campaignRows = await tursoQuery(c.env, `SELECT * FROM admin_notification_campaigns WHERE id = ? LIMIT 1`, [id]);
+  if (campaignRows.rows.length === 0) return jsonError(c, 404, 'not_found', 'Campaign not found.');
+  const deliveries = await tursoQuery(c.env, `SELECT * FROM admin_notification_deliveries WHERE campaign_id = ? ORDER BY created_at DESC LIMIT 200`, [id]);
+  // read/unread counts
+  const readCount = await tursoQuery(c.env, `SELECT COUNT(*) as c FROM admin_notification_deliveries WHERE campaign_id = ? AND read_at IS NOT NULL`, [id]);
+  return c.json({
+    campaign: campaignRows.rows[0],
+    deliveries: deliveries.rows,
+    read_count: Number(readCount.rows[0]?.c ?? 0),
+  });
 });
 
 admin.get('/errors', async (c) => {

@@ -32,6 +32,15 @@ export interface Bindings {
   AUTHACTION_DISCOVERY_URL?: string;
   /** AuthAction frontend client id, used only to reject ID tokens. */
   AUTHACTION_CLIENT_ID?: string;
+
+  // ---------------------------------------------------------------------------
+  // AuthAction Management API (M2M) — server-side only. Never exposed to the
+  // browser. Used by the admin identity directory synchronization.
+  // ---------------------------------------------------------------------------
+  AUTHACTION_M2M_CLIENT_ID?: string;
+  AUTHACTION_M2M_CLIENT_SECRET?: string;
+  /** Defaults to AUTHACTION_ISSUER when unset. */
+  AUTHACTION_M2M_AUDIENCE?: string;
   /** Comma separated allowlist of accepted JWT algorithms. Default: RS256. */
   AUTHACTION_REQUIRED_ALGS?: string;
   /** Claim holding the email address. Default: email. */

@@ -13,6 +13,7 @@ import filesRouter from './routes/files';
 import crmRouter from './routes/crm';
 import settingsRouter from './routes/settings';
 import notificationsRouter from './routes/notifications';
+import announcementsRouter from './routes/announcements';
 import templatesRouter from './routes/templates';
 import adminRouter from './routes/admin';
 import adminActionsRouter from './routes/admin-actions';
@@ -21,6 +22,7 @@ import organizeRouter from './routes/organize';
 import summaryRouter from './routes/summary';
 import marketingRouter from './routes/marketing';
 import { runHourly } from './cron/summary';
+import { runAuthActionSync } from './services/authaction-sync';
 import { newReferenceCode } from './utils/http';
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -86,6 +88,7 @@ app.route('/api/files', filesRouter);
 app.route('/api/crm', crmRouter);
 app.route('/api/settings', settingsRouter);
 app.route('/api/notifications', notificationsRouter);
+app.route('/api/announcements', announcementsRouter);
 app.route('/api/templates', templatesRouter);
 app.route('/api/admin', adminRouter);
 app.route('/api/admin', adminActionsRouter);
@@ -134,5 +137,6 @@ export default {
   fetch: app.fetch,
   scheduled: async (_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) => {
     ctx.waitUntil(runHourly(env));
+    ctx.waitUntil(runAuthActionSync(env, 'cron').catch(() => undefined));
   },
 };

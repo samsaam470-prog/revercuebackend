@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { tursoExecute, tursoQuery } from '../utils/turso';
 import { userAuthMiddleware, getAuth } from '../middleware/user-auth';
+import { createNotification } from '../services/notifications';
 import { generateId } from '../utils/ids';
 import {
   onboardingStep1Schema,
@@ -180,6 +181,7 @@ onboarding.patch('/step-5', async (c) => {
     `UPDATE users SET onboarding_step = 6, updated_at = ? WHERE id = ?`,
     [new Date().toISOString(), auth.userId]
   );
+  createNotification(c.env, { userId: auth.userId, eventType: 'onboarding_completed', title: 'Onboarding complete', body: 'Your account setup is complete. Welcome to Revercue!' }).catch(() => undefined);
   return c.json({ success: true, onboarding_step: 6 });
 });
 

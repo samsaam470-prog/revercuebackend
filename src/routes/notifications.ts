@@ -166,6 +166,11 @@ notifications.patch('/:id/read', async (c) => {
     c.req.param('id'),
     auth.userId,
   ]);
+  await tursoExecute(
+    c.env,
+    `UPDATE admin_notification_deliveries SET read_at = ? WHERE notification_id = ? AND user_id = ? AND read_at IS NULL`,
+    [new Date().toISOString(), c.req.param('id'), auth.userId]
+  ).catch(() => undefined);
   return c.json({ success: true });
 });
 
