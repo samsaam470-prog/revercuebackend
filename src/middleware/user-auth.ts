@@ -15,6 +15,7 @@ import {
   resolveOrProvisionUser,
   touchIdentityLogin,
 } from '../services/identity';
+import { createNotification } from '../services/notifications';
 
 /** Legacy app token payload. Retained for the AuthAction transition window. */
 export interface UserPayload {
@@ -156,6 +157,14 @@ export async function authenticateRequest(
     }
 
     await touchIdentityLogin(env, identity.subject);
+    if (provisioned.created) {
+      createNotification(env, {
+        userId: provisioned.user.id,
+        eventType: 'new_user_registration',
+        title: 'Welcome to Revercue',
+        body: 'Your account has been created. Complete onboarding to get started.',
+      }).catch(() => undefined);
+    }
     return {
       auth: {
         userId: provisioned.user.id,

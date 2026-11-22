@@ -23,6 +23,7 @@ import summaryRouter from './routes/summary';
 import marketingRouter from './routes/marketing';
 import { runHourly } from './cron/summary';
 import { runAuthActionSync } from './services/authaction-sync';
+import { runPublishCron } from './cron/publish';
 import { newReferenceCode } from './utils/http';
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -138,5 +139,6 @@ export default {
   scheduled: async (_event: ScheduledEvent, env: Bindings, ctx: ExecutionContext) => {
     ctx.waitUntil(runHourly(env));
     ctx.waitUntil(runAuthActionSync(env, 'cron').catch(() => undefined));
+    ctx.waitUntil(runPublishCron(env).catch(() => undefined));
   },
 };

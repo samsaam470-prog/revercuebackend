@@ -692,7 +692,7 @@ admin.post('/notifications', async (c) => {
   return c.json({ success: true, id, status }, 201);
 });
 
-async function deliverCampaign(env: Bindings, campaignId: string): Promise<void> {
+export async function deliverCampaign(env: Bindings, campaignId: string): Promise<void> {
   const rows = await tursoQuery(env, `SELECT * FROM admin_notification_campaigns WHERE id = ? LIMIT 1`, [campaignId]);
   if (rows.rows.length === 0) return;
   const campaign = rows.rows[0];
