@@ -259,23 +259,6 @@ settings.post('/security/change-password', async (c) => {
   return c.json({ success: true });
 });
 
-settings.post('/security/2fa', async (c) => {
-  const auth = getAuth(c);
-  const b = await c.req.json().catch(() => ({}));
-  const user = await tursoQuery(c.env, `SELECT password_hash FROM users WHERE id = ? LIMIT 1`, [auth.userId]);
-  if (user.rows[0]?.password_hash) {
-    if (!(await bcrypt.compare(String(b.current_password ?? ''), String(user.rows[0].password_hash)))) {
-      return jsonError(c, 401, 'invalid_credentials', 'The current password is not correct.');
-    }
-  }
-  await tursoExecute(c.env, `UPDATE users SET two_factor_enabled = ?, updated_at = ? WHERE id = ?`, [
-    b.enabled ? 1 : 0,
-    new Date().toISOString(),
-    auth.userId,
-  ]);
-  return c.json({ success: true, two_factor_enabled: Boolean(b.enabled) });
-});
-
 settings.get('/security/sessions', async (c) => {
   const auth = getAuth(c);
   const rows = await tursoQuery(

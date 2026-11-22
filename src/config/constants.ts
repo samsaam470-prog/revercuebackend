@@ -174,9 +174,6 @@ export const TEAM_FEATURES: Record<Plan, boolean> = {
 
 export const DEFAULT_MARGIN_PERCENT = 30;
 
-export const OTP_EXPIRY_MINUTES = 5;
-export const OTP_MAX_ATTEMPTS = 3;
-export const OTP_RESEND_COOLDOWN_SECONDS = 90;
 
 export const TRACKING_RETENTION_DAYS = 5;
 export const NOTIFICATION_RETENTION_DAYS = 90;

@@ -40,9 +40,12 @@ outside migrations and is treated as pre-existing production state.
 - **New** `src/middleware/access.ts`: `requirePlan`, `requireRole`, ownership assertions.
 - Auth routes: `GET /api/auth/me` uses the shared middleware, provisions or retrieves the
   Revercue user, and returns `authenticated`, the user and an `onboarding` object
-  (`required`, `complete`, `step`, `next_step`, `destination`). The old signup/login/OTP
-  endpoints remain for compatibility until the frontend migrates. Revercue remains the
-  source of truth for plan, payment status, roles and feature access.
+  (`required`, `complete`, `step`, `next_step`, `destination`) plus `email_missing`.
+  AuthAction owns sign-up, sign-in, email verification, second factors and password reset;
+  Revercue exposes no signup, OTP, verification, 2FA-code or password-reset route. Only
+  `/api/auth/login` remains, for pre-existing Revercue passwords, and it never checks an
+  email code. Revercue remains the source of truth for plan, payment status, roles and
+  feature access.
 - Removed: `POST /api/auth/link/start`, `POST /api/auth/link/confirm`, the account-link OTP
   email template and the `account_link_required` response. Those routes now return `404`.
 
@@ -293,7 +296,7 @@ longer written or read.
 | `COOPER_API_KEY` | Cooper Email |
 | `OPENMAIL_API_KEY` | OpenMail fallback |
 | `SIGNING_LINK_SECRET` | Signed-download/signing/newsletter/file tokens (falls back to `USER_JWT_KEY` with a logged warning) |
-| `OTP_HASH_KEY` | Legacy OTP hashing (only while legacy auth is retained) |
+| `OTP_HASH_KEY` | No longer read: Revercue issues no OTP. `USER_JWT_KEY` is used for session IP hashing. |
 | `AUTHACTION_MANAGEMENT_TOKEN` | Not used by the Worker; only for operator tooling if you provision clients programmatically |
 
 ### C. Optional
@@ -302,9 +305,11 @@ longer written or read.
 `EMAIL_FROM`, `ENVIRONMENT`.
 
 ### D. Removable after migration
-`OTP_HASH_KEY` (once legacy OTP is retired), `ALLOW_LEGACY_AUTH` → can be set to `false`
-(keep the variable), `formsubmit_activations` related rows, and the legacy `/auth/signup`,
-`/auth/login`, `/auth/otp/*` endpoints once the frontend cutover is complete.
+`OTP_HASH_KEY`, `ALLOW_LEGACY_AUTH` → can be set to `false` (keep the variable),
+`formsubmit_activations` related rows, and the remaining legacy `/auth/login` endpoint once
+the frontend cutover is complete. The Revercue `/auth/signup`, `/auth/verify-email`,
+`/auth/resend-verification`, `/auth/2fa/*` and `/auth/password-reset/*` routes have already
+been removed; AuthAction handles those flows.
 
 No AuthAction credential is stored in source, migrations or `wrangler.toml`.
 
@@ -411,9 +416,10 @@ signature" action.
 1. **Frontend (required before release).**
    - Replace the account-linking screen with direct AuthAction login; use
      `GET /api/auth/me` to establish the session and route to
-     `onboarding.destination`. Handle `email_verification_required`,
-     `account_conflict`, `identity_orphaned` and `identity_store_unavailable`.
-     The full contract is `docs/AUTH_ONBOARDING.md`.
+     `onboarding.destination`. Do not block onboarding on email verification;
+     handle `account_conflict`, `identity_orphaned` and
+     `identity_store_unavailable`. The full contract is
+     `docs/AUTH_ONBOARDING.md`.
    - Drawn-signature UI + explicit consent checkbox for freelancer and client signing.
    - Stop treating "approve" as a signature; call `/sign` and handle `409 signature_required`.
    - Pass a stable `visit_id` (and `client_submission_id`) on tracking events.

@@ -21,7 +21,7 @@ export interface FakeIdentityRow {
   user_id: string;
   provider: string;
   subject: string;
-  email_at_link: string;
+  email_at_link: string | null;
   created_at: string;
   last_login_at: string;
 }
@@ -106,19 +106,34 @@ export async function tursoQuery(
     return result(row ? [row as unknown as Record<string, unknown>] : []);
   }
 
-  if (statement.startsWith('SELECT id, email, plan FROM users WHERE lower(email) = ?')) {
+  if (statement.startsWith('SELECT id, email, plan, email_verified FROM users WHERE lower(email) = ?')) {
     const email = String(args[0] ?? '').toLowerCase();
     return result(
       tursoState.users
         .filter((user) => user.email.toLowerCase() === email)
         .slice(0, 5)
-        .map(({ id, email: userEmail, plan }) => ({ id, email: userEmail, plan }))
+        .map(({ id, email: userEmail, plan, email_verified }) => ({
+          id,
+          email: userEmail,
+          plan,
+          email_verified,
+        }))
     );
   }
 
-  if (statement.startsWith('SELECT id, email, plan FROM users WHERE id = ?')) {
+  if (statement.startsWith('SELECT id, email, plan, email_verified FROM users WHERE id = ?')) {
     const row = tursoState.users.find((user) => user.id === args[0]);
-    return result(row ? [{ id: row.id, email: row.email, plan: row.plan }] : []);
+    return result(
+      row ? [{ id: row.id, email: row.email, plan: row.plan, email_verified: row.email_verified }] : []
+    );
+  }
+
+  if (statement.startsWith('SELECT id FROM users WHERE email = ? AND email_verified = 1')) {
+    const email = String(args[0] ?? '').toLowerCase();
+    const row = tursoState.users.find(
+      (user) => user.email.toLowerCase() === email && user.email_verified === 1
+    );
+    return result(row ? [{ id: row.id }] : []);
   }
 
   if (statement.startsWith('SELECT * FROM users WHERE id = ?')) {
@@ -126,8 +141,22 @@ export async function tursoQuery(
     return result(row ? [row as unknown as Record<string, unknown>] : []);
   }
 
+  if (statement.startsWith('SELECT email FROM users WHERE id = ?')) {
+    const row = tursoState.users.find((user) => user.id === args[0]);
+    return result(row ? [{ email: row.email }] : []);
+  }
+
+  if (statement.startsWith('SELECT id FROM users WHERE lower(email) = ? AND id <> ?')) {
+    const email = String(args[0] ?? '').toLowerCase();
+    const userId = String(args[1] ?? '');
+    const row = tursoState.users.find(
+      (user) => user.id !== userId && user.email.toLowerCase() === email
+    );
+    return result(row ? [{ id: row.id }] : []);
+  }
+
   if (statement.startsWith('INSERT INTO users ')) {
-    const [id, email, createdAt, updatedAt] = args.map(String);
+    const [id, email, emailVerified, createdAt, updatedAt] = args.map(String);
     if (tursoState.users.some((user) => user.id === id)) return result([]);
     if (
       tursoState.enforceUniqueEmail &&
@@ -139,7 +168,7 @@ export async function tursoQuery(
       id,
       email,
       plan: 'free',
-      email_verified: 1,
+      email_verified: emailVerified === '1' ? 1 : 0,
       onboarding_step: 1,
       created_at: createdAt,
       updated_at: updatedAt,
@@ -150,7 +179,8 @@ export async function tursoQuery(
   }
 
   if (statement.startsWith('INSERT INTO user_identities ')) {
-    const [id, userId, provider, subject, email] = args.map(String);
+    const [id, userId, provider, subject] = args.map(String);
+    const email = args[4] == null ? null : String(args[4]);
     if (
       tursoState.identities.some(
         (identity) => identity.provider === provider && identity.subject === subject
@@ -183,6 +213,16 @@ export async function tursoQuery(
     const userId = String(args[args.length - 1]);
     const row = tursoState.users.find((user) => user.id === userId);
     if (row) row.email_verified = 1;
+    return result([]);
+  }
+
+  if (statement.startsWith('UPDATE users SET email = ?, updated_at = ?')) {
+    const [email, updatedAt, userId] = args.map(String);
+    const row = tursoState.users.find((user) => user.id === userId);
+    if (row && !String(row.email ?? '').trim()) {
+      row.email = email;
+      row.updated_at = updatedAt;
+    }
     return result([]);
   }
 

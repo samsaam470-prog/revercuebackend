@@ -13,9 +13,10 @@ import type { Bindings } from '../types';
  *  - an existing `(provider, subject)` mapping always wins;
  *  - a brand-new subject gets one deterministic Revercue user id, so concurrent
  *    requests cannot create duplicate users;
- *  - an existing Revercue user may be adopted only when AuthAction asserts that
- *    the email is verified. An unverified email is never treated as proof of
- *    account ownership.
+ *  - a valid token is enough to create the Revercue user and start onboarding,
+ *    whether or not AuthAction has verified the email yet;
+ *  - email verification is stored honestly. An unverified email never claims an
+ *    existing Revercue account; only a verified AuthAction email may adopt one.
  */
 
 const PROVIDER = 'authaction';
@@ -31,6 +32,7 @@ export interface RevercueUser {
   id: string;
   email: string;
   plan: string;
+  emailVerified: boolean;
 }
 
 export interface UserIdentityRow {
@@ -41,10 +43,7 @@ export interface UserIdentityRow {
   email_at_link: string | null;
 }
 
-export type ProvisionFailureCode =
-  | 'email_verification_required'
-  | 'account_conflict'
-  | 'identity_orphaned';
+export type ProvisionFailureCode = 'account_conflict' | 'identity_orphaned';
 
 export type ProvisionResult =
   | {
@@ -83,6 +82,15 @@ async function identityExecute(env: Bindings, sql: string, args: unknown[] = [])
   }
 }
 
+function mapUser(row: any): RevercueUser {
+  return {
+    id: String(row.id),
+    email: String(row.email ?? ''),
+    plan: String(row.plan ?? 'free'),
+    emailVerified: Number(row.email_verified) === 1 || row.email_verified === true,
+  };
+}
+
 export async function findIdentity(
   env: Bindings,
   subject: string
@@ -96,30 +104,29 @@ export async function findIdentity(
 }
 
 export async function getUserById(env: Bindings, userId: string): Promise<RevercueUser | null> {
-  const result = await identityQuery(env, `SELECT id, email, plan FROM users WHERE id = ? LIMIT 1`, [
-    userId,
-  ]);
+  const result = await identityQuery(
+    env,
+    `SELECT id, email, plan, email_verified FROM users WHERE id = ? LIMIT 1`,
+    [userId]
+  );
   if (result.rows.length === 0) return null;
-  const row = result.rows[0];
-  return { id: String(row.id), email: String(row.email ?? ''), plan: String(row.plan ?? 'free') };
+  return mapUser(result.rows[0]);
 }
 
 /**
- * Returns every Revercue user with this email, case-insensitively. More than
- * one match is a data ambiguity that must not be resolved by guessing.
+ * Returns every Revercue user with this email, case-insensitively. This is used
+ * only as a verified-email adoption fallback for accounts created before
+ * AuthAction identity mapping existed. More than one match is a data ambiguity
+ * that must not be resolved by guessing.
  */
 export async function findUsersByEmail(env: Bindings, email: string): Promise<RevercueUser[]> {
   const normalized = email.trim().toLowerCase();
   const result = await identityQuery(
     env,
-    `SELECT id, email, plan FROM users WHERE lower(email) = ? LIMIT 5`,
+    `SELECT id, email, plan, email_verified FROM users WHERE lower(email) = ? LIMIT 5`,
     [normalized]
   );
-  return result.rows.map((row: any) => ({
-    id: String(row.id),
-    email: String(row.email ?? ''),
-    plan: String(row.plan ?? 'free'),
-  }));
+  return result.rows.map(mapUser);
 }
 
 async function authActionUserId(subject: string): Promise<string> {
@@ -130,23 +137,23 @@ async function authActionUserId(subject: string): Promise<string> {
 
 async function insertUserIfAbsent(
   env: Bindings,
-  input: { id: string; email: string }
+  input: { id: string; email: string; emailVerified: boolean }
 ): Promise<boolean> {
   const now = new Date().toISOString();
   const result = await identityQuery(
     env,
     `INSERT INTO users (id, email, plan, email_verified, onboarding_step, created_at, updated_at)
-     VALUES (?, ?, 'free', 1, 1, ?, ?)
+     VALUES (?, ?, 'free', ?, 1, ?, ?)
      ON CONFLICT(id) DO NOTHING
      RETURNING id`,
-    [input.id, input.email, now, now]
+    [input.id, input.email, input.emailVerified ? 1 : 0, now, now]
   );
   return result.rows.length > 0;
 }
 
 async function insertIdentityIfAbsent(
   env: Bindings,
-  input: { userId: string; subject: string; email: string }
+  input: { userId: string; subject: string; email: string | null }
 ): Promise<boolean> {
   const now = new Date().toISOString();
   const result = await identityQuery(
@@ -168,6 +175,10 @@ async function insertIdentityIfAbsent(
   return result.rows.length > 0;
 }
 
+/**
+ * Records AuthAction's verification state. This is monotonic: a verified email
+ * stays verified, and a missing/false claim never downgrades the stored value.
+ */
 async function markEmailVerified(env: Bindings, userId: string): Promise<void> {
   await identityExecute(
     env,
@@ -187,6 +198,11 @@ export async function touchIdentityLogin(env: Bindings, subject: string): Promis
 /**
  * Establishes or retrieves the Revercue application user for an authenticated
  * AuthAction identity. Safe to call on every authenticated request.
+ *
+ * Authentication and application identity are keyed on the verified `sub`.
+ * Email is contact data, not an authentication key. It is used only to adopt a
+ * pre-existing Revercue account when AuthAction explicitly asserts that the
+ * email is verified.
  */
 export async function resolveOrProvisionUser(
   env: Bindings,
@@ -201,8 +217,12 @@ export async function resolveOrProvisionUser(
     };
   }
 
+  const email = identity.email?.trim().toLowerCase() || null;
+  const emailVerified = identity.emailVerified === true && Boolean(email);
+
   const existingIdentity = await findIdentity(env, subject);
   if (existingIdentity) {
+    if (emailVerified) await markEmailVerified(env, existingIdentity.user_id);
     const user = await getUserById(env, existingIdentity.user_id);
     if (!user) {
       return {
@@ -216,42 +236,42 @@ export async function resolveOrProvisionUser(
 
   // Only a claim that AuthAction has verified may be used to match an existing
   // Revercue account. A client-supplied or unverified email is never enough.
-  if (!identity.email || identity.emailVerified !== true) {
-    return {
-      ok: false,
-      code: 'email_verification_required',
-      message: 'Verify your email address with AuthAction before continuing to Revercue.',
-    };
+  let existingUser: RevercueUser | null = null;
+  if (emailVerified && email) {
+    const matches = await findUsersByEmail(env, email);
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        code: 'account_conflict',
+        message:
+          'More than one Revercue account uses this email address. Contact support so the accounts can be resolved safely.',
+      };
+    }
+    existingUser = matches[0] ?? null;
   }
 
-  const email = identity.email.trim().toLowerCase();
-  const matches = await findUsersByEmail(env, email);
-  if (matches.length > 1) {
-    return {
-      ok: false,
-      code: 'account_conflict',
-      message:
-        'More than one Revercue account uses this email address. Contact support so the accounts can be resolved safely.',
-    };
-  }
-
-  const existingUser = matches[0] ?? null;
   let user: RevercueUser | null = existingUser;
   let created = false;
   let linkedExisting = Boolean(existingUser);
 
   if (user) {
     await markEmailVerified(env, user.id);
+    user = { ...user, emailVerified: true };
   } else {
     const userId = await authActionUserId(subject);
     try {
-      created = await insertUserIfAbsent(env, { id: userId, email });
+      created = await insertUserIfAbsent(env, {
+        id: userId,
+        email: email ?? '',
+        emailVerified,
+      });
       user = await getUserById(env, userId);
     } catch (error) {
       if (!(error instanceof IdentityStoreError)) throw error;
-      // If the users table enforces a unique email, a concurrent request with
-      // the same verified email may have won the insert. Adopt that row rather
-      // than failing authentication or creating a duplicate profile.
+      // A unique email index can reject a second account for the same address.
+      // Adoption is only safe when AuthAction verified that email; an
+      // unverified address must never take over another account.
+      if (!emailVerified || !email) throw error;
       const raced = await findUsersByEmail(env, email);
       if (raced.length === 1) {
         user = raced[0];
@@ -269,7 +289,12 @@ export async function resolveOrProvisionUser(
       }
     }
     if (!user) {
-      const raced = await findUsersByEmail(env, email);
+      // The deterministic id may already exist because a concurrent request for
+      // this same subject won the insert.
+      user = await getUserById(env, userId);
+    }
+    if (!user) {
+      const raced = emailVerified && email ? await findUsersByEmail(env, email) : [];
       if (raced.length === 1) {
         user = raced[0];
         linkedExisting = true;
@@ -285,6 +310,7 @@ export async function resolveOrProvisionUser(
         throw new IdentityStoreError('The application account could not be created.');
       }
     }
+    if (emailVerified) await markEmailVerified(env, user.id);
   }
 
   const inserted = await insertIdentityIfAbsent(env, {
@@ -306,6 +332,7 @@ export async function resolveOrProvisionUser(
         message: 'This sign-in is attached to an application account that no longer exists.',
       };
     }
+    if (emailVerified) await markEmailVerified(env, winnerUser.id);
     return { ok: true, user: winnerUser, created: false, linked_existing: false };
   }
 

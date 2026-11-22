@@ -3,34 +3,28 @@ import { SignJWT, jwtVerify } from 'jose';
 import bcrypt from 'bcryptjs';
 import { tursoQuery, tursoExecute } from '../utils/turso';
 import { generateId } from '../utils/ids';
-import { generateOTP, hashOTP, verifyOTP, otpExpiryISO } from '../utils/otp';
+import { hashOTP } from '../utils/otp';
 import { sendTransactionalEmail } from '../services/email';
 import { checkRateLimit } from '../services/rate-limit';
-import { OTP_EXPIRY_MINUTES, OTP_MAX_ATTEMPTS, OTP_RESEND_COOLDOWN_SECONDS } from '../config/constants';
 import { userAuthMiddleware, getAuth } from '../middleware/user-auth';
 import { getOnboardingState } from '../services/onboarding';
 import type { Bindings } from '../types';
 
+/**
+ * Authentication lifecycle belongs to AuthAction: sign-up, sign-in, email
+ * verification, password reset and second factors all happen there.
+ *
+ * Revercue keeps only:
+ *  - `GET /me` for an AuthAction access token (provisioning + onboarding state),
+ *  - `POST /logout` while the legacy session transition is open,
+ *  - `POST /login` for pre-existing Revercue password accounts.
+ *
+ * There is no Revercue signup, OTP, email-verification, 2FA-code or
+ * password-reset endpoint. Forgot password is an AuthAction flow. A Revercue
+ * user's email is contact data; it is never verified by Revercue.
+ */
+
 const auth = new Hono<{ Bindings: Bindings }>();
-
-function otpEmailHtml(code: string, contactUrl: string): string {
-  return '<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head><body style="margin:0;padding:0;background:#0A0A0A;font-family:Inter,-apple-system,BlinkMacSystemFont,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#0A0A0A;padding:48px 24px;"><tr><td align="center"><table width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background:#141414;border:1px solid #2A2A2A;border-radius:8px;padding:40px;"><tr><td align="center" style="padding-bottom:32px;"><span style="font-family:Georgia,serif;font-size:26px;color:#FFFFFF;">[<span style="color:#C9A961;">R</span>] Revercue</span></td></tr><tr><td align="center" style="padding-bottom:8px;"><span style="font-size:12px;font-weight:500;letter-spacing:0.1em;text-transform:uppercase;color:#C9A961;">YOUR VERIFICATION CODE</span></td></tr><tr><td align="center" style="padding-bottom:24px;"><h1 style="font-family:Georgia,serif;font-size:30px;font-weight:400;color:#FFFFFF;margin:0;line-height:1.2;">Here is your code.</h1></td></tr><tr><td align="center" style="padding-bottom:8px;"><div style="font-family:monospace;font-size:42px;font-weight:600;color:#C9A961;letter-spacing:10px;background:#0A0A0A;border:1px solid #2A2A2A;border-radius:6px;padding:20px 28px;display:inline-block;">' + code + '</div></td></tr><tr><td align="center" style="padding-bottom:32px;"><a href="#" onclick="navigator.clipboard.writeText(\'' + code + '\');return false;" style="display:inline-block;background:#C9A961;color:#0A0A0A;font-size:14px;font-weight:600;padding:10px 24px;border-radius:6px;text-decoration:none;">Copy code</a></td></tr><tr><td align="left" style="padding-bottom:20px;"><p style="font-size:15px;color:#A0A0A0;line-height:1.6;margin:0;">This code is for your Revercue account. It verifies that this email address is yours. Enter it on the page where you requested it.</p></td></tr><tr><td align="left" style="padding-bottom:20px;"><p style="font-size:15px;color:#A0A0A0;line-height:1.6;margin:0;"><strong style="color:#FFFFFF;">This code expires in 5 minutes.</strong> If it expires, you can request a new one.</p></td></tr><tr><td align="left" style="padding-bottom:20px;"><p style="font-size:15px;color:#A0A0A0;line-height:1.6;margin:0;"><strong style="color:#FFFFFF;">This code can only be used once.</strong> After it is used, it is no longer valid.</p></td></tr><tr><td align="left" style="padding-bottom:24px;"><p style="font-size:15px;color:#A0A0A0;line-height:1.6;margin:0;">If you did not request this code, check your account. Someone may be trying to access it. If you did not sign up for Revercue, ignore this email. Your account is safe.</p></td></tr><tr><td align="center" style="padding-bottom:16px;"><a href="' + contactUrl + '" style="display:inline-block;background:transparent;color:#C9A961;font-size:14px;font-weight:600;padding:10px 24px;border:1px solid #C9A961;border-radius:6px;text-decoration:none;">Contact Revercue</a></td></tr><tr><td align="left" style="padding-bottom:24px;"><p style="font-size:14px;color:#A0A0A0;line-height:1.6;margin:0;">If your email provider is blocking the code, contact the provider help team (Google, Outlook, or your provider). The code is not from them, but they can help with the delivery.</p></td></tr><tr><td align="center" style="border-top:1px solid #2A2A2A;padding-top:24px;"><p style="font-size:12px;color:#6B6B6B;margin:0;">Revercue - Your work should speak, not you.</p></td></tr></table></td></tr></table></body></html>';
-}
-
-function otpEmailText(code: string, contactUrl: string): string {
-  return 'Here is your Revercue verification code: ' + code + '\n\n' +
-    'This code is for your Revercue account. It verifies that this email address is yours. Enter it on the page where you requested it.\n\n' +
-    'This code expires in 5 minutes. If it expires, you can request a new one.\n\n' +
-    'This code can only be used once. After it is used, it is no longer valid.\n\n' +
-    'If you did not request this code, check your account. Someone may be trying to access it. If you did not sign up for Revercue, ignore this email. Your account is safe.\n\n' +
-    'If you need help, contact Revercue: ' + contactUrl + '\n\n' +
-    'If your email provider is blocking the code, contact the provider help team (Google, Outlook, or your provider). The code is not from them, but they can help with the delivery.\n\n' +
-    'Revercue - Your work should speak, not you.';
-}
-
-async function hashPassword(password: string): Promise<string> {
-  return await bcrypt.hash(password, 10);
-}
 
 async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
   try { return await bcrypt.compare(password, storedHash); } catch { return false; }
@@ -44,22 +38,6 @@ async function issueUserToken(userId: string, email: string, plan: string, key: 
   return await builder.sign(new TextEncoder().encode(key));
 }
 
-async function issuePreAuth(userId: string, email: string, purpose: string, key: string): Promise<string> {
-  return await new SignJWT({ sub: userId, email, purpose, pre_auth: true })
-    .setProtectedHeader({ alg: 'HS256' })
-    .setIssuedAt()
-    .setExpirationTime('15m')
-    .sign(new TextEncoder().encode(key));
-}
-
-function otpKey(env: Bindings): string {
-  return (env as any).OTP_HASH_KEY || env.USER_JWT_KEY;
-}
-
-function contactUrl(env: Bindings): string {
-  return (env as any).VITE_CONTACT_URL || 'https://revercue.co.uk/contact';
-}
-
 async function createSession(env: Bindings, userId: string, jwtId: string, ua?: string | null, ip?: string | null, country?: string | null): Promise<void> {
   const now = new Date().toISOString();
   const expires = new Date(Date.now() + 12 * 3600 * 1000).toISOString();
@@ -68,34 +46,6 @@ async function createSession(env: Bindings, userId: string, jwtId: string, ua?: 
   const ipHash = ip ? await hashOTP(ip, env.USER_JWT_KEY) : null;
   await tursoExecute(env, `INSERT INTO sessions (id, user_id, jwt_id, device, browser, ip_hash, location, created_at, last_active_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [generateId('sess'), userId, jwtId, device, browser, ipHash, country ?? null, now, now, expires]);
 }
-
-auth.post('/signup', async (c) => {
-  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
-  const rl = await checkRateLimit(c.env, `signup:${ip}`, 5, 3600);
-  if (!rl.allowed) return c.json({ error: 'rate_limited', retry_after: rl.retryAfter }, 429);
-
-  const body = await c.req.json().catch(() => ({}));
-  const email = String(body.email ?? '').trim().toLowerCase();
-  const password = String(body.password ?? '');
-  if (!email || !password || password.length < 8 || body.tos_accepted !== true) return c.json({ error: 'invalid_payload' }, 400);
-
-  const exists = await tursoQuery(c.env, `SELECT id FROM users WHERE email = ?`, [email]);
-  if (exists.rows.length > 0) return c.json({ error: 'conflict' }, 409);
-
-  const userId = generateId('usr');
-  const now = new Date().toISOString();
-  const passwordHash = await hashPassword(password);
-  await tursoExecute(c.env, `INSERT INTO users (id, email, password_hash, plan, newsletter_opt_in, newsletter_opt_in_date, onboarding_step, created_at, updated_at) VALUES (?, ?, ?, 'free', ?, ?, 1, ?, ?)`, [userId, email, passwordHash, body.newsletter_opt_in ? 1 : 0, body.newsletter_opt_in ? now : null, now, now]);
-
-  const code = generateOTP();
-  const codeHash = await hashOTP(code, otpKey(c.env));
-  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, codeHash, otpExpiryISO(OTP_EXPIRY_MINUTES), now, now]);
-
-  const url = contactUrl(c.env);
-  await sendTransactionalEmail(c.env, email, 'Your Revercue verification code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
-
-  return c.json({ success: true, token: await issuePreAuth(userId, email, 'signup', c.env.USER_JWT_KEY), user: { id: userId, email, plan: 'free', onboarding_step: 1, email_verified: false } }, 201);
-});
 
 auth.post('/login', async (c) => {
   const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
@@ -107,27 +57,14 @@ auth.post('/login', async (c) => {
   const password = String(body.password ?? '');
   if (!email || !password) return c.json({ error: 'invalid_payload' }, 400);
 
+  // Transition path for Revercue accounts that predate AuthAction. It never
+  // sends or checks an email code: unverified accounts are not blocked, and
+  // AuthAction remains the only place a code or reset happens.
   const result = await tursoQuery(c.env, `SELECT * FROM users WHERE email = ?`, [email]);
   if (result.rows.length === 0) return c.json({ error: 'invalid_credentials' }, 401);
   const user = result.rows[0];
   if (!user.password_hash) return c.json({ error: 'invalid_credentials' }, 401);
   if (!(await verifyPassword(password, user.password_hash))) return c.json({ error: 'invalid_credentials' }, 401);
-
-  if (user.email_verified === 0) {
-    const code = generateOTP();
-    await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), user.id, user.email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-    const url = contactUrl(c.env);
-    await sendTransactionalEmail(c.env, user.email, 'Your Revercue verification code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
-    return c.json({ success: true, requires_verification: true, token: await issuePreAuth(user.id, user.email, 'signup', c.env.USER_JWT_KEY) });
-  }
-
-  if (user.two_factor_enabled) {
-    const code = generateOTP();
-    await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, '2fa', 0, ?, ?, ?)`, [generateId('otp'), user.id, user.email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-    const url = contactUrl(c.env);
-    await sendTransactionalEmail(c.env, user.email, 'Your Revercue 2FA code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
-    return c.json({ success: true, requires_2fa: true, pre_2fa_token: await issuePreAuth(user.id, user.email, '2fa', c.env.USER_JWT_KEY) });
-  }
 
   const jti = generateId('jti');
   const token = await issueUserToken(user.id, user.email, user.plan, c.env.USER_JWT_KEY, jti);
@@ -168,143 +105,6 @@ auth.post('/google', async (c) => {
   return c.json({ success: true, token, user: { id: user.id, email: user.email, plan: user.plan, onboarding_step: user.onboarding_step } });
 });
 
-auth.post('/verify-email', async (c) => {
-  const header = c.req.header('Authorization') ?? '';
-  if (!header.startsWith('Bearer ')) return c.json({ error: 'unauthorized' }, 401);
-  const body = await c.req.json().catch(() => ({}));
-  let userId: string; let email: string;
-  try {
-    const { payload } = await jwtVerify(header.slice(7).trim(), new TextEncoder().encode(c.env.USER_JWT_KEY));
-    userId = payload.sub as string; email = payload.email as string;
-  } catch { return c.json({ error: 'unauthorized' }, 401); }
-
-  const row = await tursoQuery(c.env, `SELECT * FROM otp_codes WHERE user_id = ? AND purpose = 'signup' ORDER BY created_at DESC LIMIT 1`, [userId]);
-  if (row.rows.length === 0) return c.json({ error: 'code_expired' }, 400);
-  const otp = row.rows[0];
-  if (new Date(otp.expires_at).getTime() < Date.now()) { await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]); return c.json({ error: 'code_expired' }, 400); }
-  if (Number(otp.attempts) >= OTP_MAX_ATTEMPTS) return c.json({ error: 'too_many_attempts' }, 429);
-  if (!(await verifyOTP(String(body.code ?? ''), otp.code_hash, otpKey(c.env)))) {
-    await tursoExecute(c.env, `UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?`, [otp.id]);
-    return c.json({ error: 'invalid_code', attempts_remaining: OTP_MAX_ATTEMPTS - Number(otp.attempts) - 1 }, 400);
-  }
-  await tursoExecute(c.env, `UPDATE users SET email_verified = 1, updated_at = ? WHERE id = ?`, [new Date().toISOString(), userId]);
-  await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]);
-
-  const user = await tursoQuery(c.env, `SELECT plan FROM users WHERE id = ?`, [userId]);
-  const jti = generateId('jti');
-  const token = await issueUserToken(userId, email, user.rows[0]?.plan ?? 'free', c.env.USER_JWT_KEY, jti);
-  await createSession(c.env, userId, jti, c.req.header('User-Agent'), c.req.header('CF-Connecting-IP'), c.req.header('CF-IPCountry'));
-  return c.json({ success: true, email_verified: true, token });
-});
-
-auth.post('/resend-verification', async (c) => {
-  const header = c.req.header('Authorization') ?? '';
-  if (!header.startsWith('Bearer ')) return c.json({ error: 'unauthorized' }, 401);
-  let userId: string; let email: string;
-  try {
-    const { payload } = await jwtVerify(header.slice(7).trim(), new TextEncoder().encode(c.env.USER_JWT_KEY));
-    userId = payload.sub as string; email = payload.email as string;
-  } catch { return c.json({ error: 'unauthorized' }, 401); }
-
-  const last = await tursoQuery(c.env, `SELECT last_requested_at FROM otp_codes WHERE user_id = ? AND purpose = 'signup' ORDER BY created_at DESC LIMIT 1`, [userId]);
-  if (last.rows.length > 0) {
-    const elapsed = (Date.now() - new Date(last.rows[0].last_requested_at).getTime()) / 1000;
-    if (elapsed < OTP_RESEND_COOLDOWN_SECONDS) return c.json({ error: 'cooldown_active', retry_after: Math.ceil(OTP_RESEND_COOLDOWN_SECONDS - elapsed) }, 429);
-  }
-  const code = generateOTP();
-  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'signup', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-  const url = contactUrl(c.env);
-  await sendTransactionalEmail(c.env, email, 'Your Revercue verification code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
-  return c.json({ success: true, cooldown_seconds: OTP_RESEND_COOLDOWN_SECONDS });
-});
-
-auth.post('/2fa/verify', async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  let userId: string; let email: string;
-  try {
-    const { payload } = await jwtVerify(String(body.pre_2fa_token ?? ''), new TextEncoder().encode(c.env.USER_JWT_KEY));
-    userId = payload.sub as string; email = payload.email as string;
-    if (payload.purpose !== '2fa') return c.json({ error: 'unauthorized' }, 401);
-  } catch { return c.json({ error: 'unauthorized' }, 401); }
-
-  const row = await tursoQuery(c.env, `SELECT * FROM otp_codes WHERE user_id = ? AND purpose = '2fa' ORDER BY created_at DESC LIMIT 1`, [userId]);
-  if (row.rows.length === 0) return c.json({ error: 'code_expired' }, 400);
-  const otp = row.rows[0];
-  if (new Date(otp.expires_at).getTime() < Date.now()) { await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]); return c.json({ error: 'code_expired' }, 400); }
-  if (Number(otp.attempts) >= OTP_MAX_ATTEMPTS) return c.json({ error: 'too_many_attempts' }, 429);
-  if (!(await verifyOTP(String(body.code ?? ''), otp.code_hash, otpKey(c.env)))) {
-    await tursoExecute(c.env, `UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?`, [otp.id]);
-    return c.json({ error: 'invalid_code', attempts_remaining: OTP_MAX_ATTEMPTS - Number(otp.attempts) - 1 }, 400);
-  }
-  await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]);
-  const user = await tursoQuery(c.env, `SELECT plan, onboarding_step FROM users WHERE id = ?`, [userId]);
-  const jti = generateId('jti');
-  const token = await issueUserToken(userId, email, user.rows[0]?.plan ?? 'free', c.env.USER_JWT_KEY, jti);
-  await createSession(c.env, userId, jti, c.req.header('User-Agent'), c.req.header('CF-Connecting-IP'), c.req.header('CF-IPCountry'));
-  await tursoExecute(c.env, `UPDATE users SET last_login_at = ? WHERE id = ?`, [new Date().toISOString(), userId]);
-  return c.json({ success: true, token, user: { id: userId, email, plan: user.rows[0]?.plan ?? 'free', onboarding_step: user.rows[0]?.onboarding_step ?? 6 } });
-});
-
-auth.post('/2fa/resend', async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  let userId: string; let email: string;
-  try {
-    const { payload } = await jwtVerify(String(body.pre_2fa_token ?? ''), new TextEncoder().encode(c.env.USER_JWT_KEY));
-    userId = payload.sub as string; email = payload.email as string;
-  } catch { return c.json({ error: 'unauthorized' }, 401); }
-  const last = await tursoQuery(c.env, `SELECT last_requested_at FROM otp_codes WHERE user_id = ? AND purpose = '2fa' ORDER BY created_at DESC LIMIT 1`, [userId]);
-  if (last.rows.length > 0) {
-    const elapsed = (Date.now() - new Date(last.rows[0].last_requested_at).getTime()) / 1000;
-    if (elapsed < OTP_RESEND_COOLDOWN_SECONDS) return c.json({ error: 'cooldown_active', retry_after: Math.ceil(OTP_RESEND_COOLDOWN_SECONDS - elapsed) }, 429);
-  }
-  const code = generateOTP();
-  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, '2fa', 0, ?, ?, ?)`, [generateId('otp'), userId, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-  const url = contactUrl(c.env);
-  await sendTransactionalEmail(c.env, email, 'Your Revercue 2FA code', otpEmailText(code, url), otpEmailHtml(code, url), { 'Verification code': code, 'Expires in': '5 minutes' });
-  return c.json({ success: true, cooldown_seconds: OTP_RESEND_COOLDOWN_SECONDS });
-});
-
-auth.post('/password-reset/request', async (c) => {
-  const ip = c.req.header('CF-Connecting-IP') ?? 'unknown';
-  const rl = await checkRateLimit(c.env, `pwreset:${ip}`, 3, 3600);
-  if (!rl.allowed) return c.json({ error: 'rate_limited', retry_after: rl.retryAfter }, 429);
-
-  const body = await c.req.json().catch(() => ({}));
-  const email = String(body.email ?? '').trim().toLowerCase();
-  if (!email) return c.json({ error: 'invalid_payload' }, 400);
-  const user = await tursoQuery(c.env, `SELECT id FROM users WHERE email = ?`, [email]);
-  if (user.rows.length === 0) return c.json({ success: true });
-
-  const code = generateOTP();
-  await tursoExecute(c.env, `INSERT INTO otp_codes (id, user_id, email, code_hash, purpose, attempts, expires_at, last_requested_at, created_at) VALUES (?, ?, ?, ?, 'password_reset', 0, ?, ?, ?)`, [generateId('otp'), user.rows[0].id, email, await hashOTP(code, otpKey(c.env)), otpExpiryISO(OTP_EXPIRY_MINUTES), new Date().toISOString(), new Date().toISOString()]);
-  const url = contactUrl(c.env);
-  await sendTransactionalEmail(c.env, email, 'Reset your Revercue password', otpEmailText(code, url), otpEmailHtml(code, url), { 'Reset code': code, 'Expires in': '5 minutes' });
-  return c.json({ success: true });
-});
-
-auth.post('/password-reset/verify', async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  const email = String(body.email ?? '').trim().toLowerCase();
-  const code = String(body.code ?? '');
-  const newPassword = String(body.new_password ?? '');
-  if (!email || code.length !== 6 || newPassword.length < 8) return c.json({ error: 'invalid_payload' }, 400);
-
-  const row = await tursoQuery(c.env, `SELECT * FROM otp_codes WHERE email = ? AND purpose = 'password_reset' ORDER BY created_at DESC LIMIT 1`, [email]);
-  if (row.rows.length === 0) return c.json({ error: 'code_expired' }, 400);
-  const otp = row.rows[0];
-  if (new Date(otp.expires_at).getTime() < Date.now()) { await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]); return c.json({ error: 'code_expired' }, 400); }
-  if (Number(otp.attempts) >= OTP_MAX_ATTEMPTS) return c.json({ error: 'too_many_attempts' }, 429);
-  if (!(await verifyOTP(code, otp.code_hash, otpKey(c.env)))) {
-    await tursoExecute(c.env, `UPDATE otp_codes SET attempts = attempts + 1 WHERE id = ?`, [otp.id]);
-    return c.json({ error: 'invalid_code', attempts_remaining: OTP_MAX_ATTEMPTS - Number(otp.attempts) - 1 }, 400);
-  }
-  const passwordHash = await hashPassword(newPassword);
-  await tursoExecute(c.env, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, [passwordHash, new Date().toISOString(), otp.user_id]);
-  await tursoExecute(c.env, `DELETE FROM otp_codes WHERE id = ?`, [otp.id]);
-  await tursoExecute(c.env, `UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`, [new Date().toISOString(), otp.user_id]);
-  return c.json({ success: true });
-});
-
 /**
  * Current user profile + subscription + onboarding state.
  *
@@ -312,6 +112,9 @@ auth.post('/password-reset/verify', async (c) => {
  * token during the transition. For AuthAction callers the shared middleware
  * has already provisioned the Revercue user, so a valid token never produces a
  * generic 500 or an account-linking requirement.
+ *
+ * `email_missing` is true when AuthAction did not supply an email address. The
+ * frontend asks for one during onboarding step 1; Revercue never verifies it.
  */
 auth.get('/me', userAuthMiddleware, async (c) => {
   const authCtx = getAuth(c);
@@ -332,6 +135,7 @@ auth.get('/me', userAuthMiddleware, async (c) => {
     user: {
       id: u.id,
       email: u.email,
+      email_missing: !String(u.email ?? '').trim(),
       name: u.name,
       plan: u.plan,
       plan_expires_at: u.plan_expires_at ?? null,

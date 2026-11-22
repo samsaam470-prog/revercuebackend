@@ -28,6 +28,9 @@ export const otpSchema = z.object({
 
 export const onboardingStep1Schema = z.object({
   account_type: z.enum(['freelancer', 'agency']),
+  // Only used when AuthAction did not provide an email address. It is contact
+  // data, never a verified identity claim.
+  email: emailSchema.optional(),
 });
 
 export const onboardingStep2Schema = z.object({

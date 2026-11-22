@@ -25,6 +25,36 @@ onboarding.patch('/step-1', async (c) => {
   if (!parsed.success) {
     return jsonError(c, 400, 'invalid_payload', firstIssue(parsed));
   }
+
+  // AuthAction does not always release an email address. Step 1 is where the
+  // user supplies one, and it is stored exactly as given: Revercue does not
+  // send an email code and does not mark the address verified. An existing
+  // AuthAction email is never overwritten from onboarding.
+  const suppliedEmail = parsed.data.email?.trim().toLowerCase();
+  if (suppliedEmail) {
+    const current = await tursoQuery(
+      c.env,
+      `SELECT email FROM users WHERE id = ? LIMIT 1`,
+      [auth.userId]
+    );
+    const storedEmail = String(current.rows[0]?.email ?? '').trim();
+    if (!storedEmail) {
+      const taken = await tursoQuery(
+        c.env,
+        `SELECT id FROM users WHERE lower(email) = ? AND id <> ? LIMIT 1`,
+        [suppliedEmail, auth.userId]
+      );
+      if (taken.rows.length > 0) {
+        return jsonError(c, 409, 'email_in_use', 'Another Revercue account already uses that email address.');
+      }
+      await tursoExecute(
+        c.env,
+        `UPDATE users SET email = ?, updated_at = ? WHERE id = ? AND (email IS NULL OR trim(email) = '')`,
+        [suppliedEmail, new Date().toISOString(), auth.userId]
+      );
+    }
+  }
+
   await tursoExecute(
     c.env,
     `UPDATE users SET account_type = ?, onboarding_step = 2, updated_at = ? WHERE id = ?`,
@@ -114,6 +144,16 @@ onboarding.patch('/step-5', async (c) => {
     return jsonError(c, 400, 'invalid_payload', firstIssue(parsed));
   }
   if (parsed.data.plan === 'waitlist') {
+    // The waitlist is keyed on the authenticated email, so it must exist by
+    // now (step 1 collects it when AuthAction did not provide one).
+    if (!auth.email.trim()) {
+      return jsonError(
+        c,
+        400,
+        'email_required',
+        'Add your email address in step 1 before joining the waitlist.'
+      );
+    }
     const existing = await tursoQuery(
       c.env,
       `SELECT id FROM waitlist WHERE lower(email) = ? AND status = 'pending' LIMIT 1`,

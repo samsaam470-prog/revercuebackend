@@ -141,13 +141,11 @@ export async function authenticateRequest(
     }
 
     if (!provisioned.ok) {
-      const status =
-        provisioned.code === 'email_verification_required'
-          ? 403
-          : 409;
+      // A valid AuthAction subject always establishes an application identity.
+      // Remaining failures are data conflicts, not verification gates.
       return {
         failure: {
-          status,
+          status: 409,
           body: {
             error: provisioned.code,
             message: provisioned.message,
