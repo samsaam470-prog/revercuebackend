@@ -5,6 +5,7 @@ import { generatePrompt } from './prompt-creator';
 import { runLayer1 } from './pipeline';
 import { fetchVisualAssets } from './pipeline';
 import { createNotification } from './notifications';
+import { resolveClientId } from './clients';
 import {
   FORM_PROCESSING_BATCH_SIZE,
   FORM_PROCESSING_MAX_ATTEMPTS,
@@ -207,6 +208,39 @@ export async function submitPublicForm(
     ...(validation.answers as Record<string, any>),
     requirements: labelledBrief(questions, validation.answers) || validation.answers.requirements,
   });
+
+  // Build the CRM record from the submitted answers so a public submission
+  // creates (or reuses) a client automatically instead of being orphaned.
+  // Answers are keyed by question id, so scan them for an email, a name and a
+  // website rather than assuming fixed field names.
+  const qById = new Map<string, any>((Array.isArray(questions) ? questions : []).map((q: any) => [String(q.id), q]));
+  const answerEntries = Object.entries(validation.answers as Record<string, any>);
+  let foundEmail: string | null = null;
+  let foundName: string | null = null;
+  let foundWebsite: string | null = null;
+  for (const [qid, val] of answerEntries) {
+    if (typeof val !== 'string') continue;
+    const label = String(qById.get(qid)?.label ?? '').toLowerCase();
+    if (!foundEmail && /\S+@\S+\.\S+/.test(val)) foundEmail = val.trim();
+    if (!foundWebsite && /^https?:\/\//i.test(val)) foundWebsite = val.trim();
+    if (!foundName && (label.includes('name') || label.includes('company') || label.includes('business'))) foundName = val.trim();
+  }
+  if (!foundName) {
+    for (const [qid, val] of answerEntries) {
+      if (typeof val === 'string' && !/\S+@\S+\.\S+/.test(val) && !/^https?:\/\//i.test(val)) { foundName = val.trim(); break; }
+    }
+  }
+  const resolvedClientId =
+    form.client_id ??
+    (foundEmail
+      ? await resolveClientId(env, form.user_id, {
+          client_name: foundName ?? foundEmail,
+          client_email: foundEmail,
+          client_website: foundWebsite,
+          industry: typeof (validation.answers as any).industry === 'string' ? (validation.answers as any).industry : null,
+          source: 'form_submission',
+        })
+      : null);
   const id = generateId('sub');
   const now = new Date().toISOString();
 
@@ -219,7 +253,7 @@ export async function submitPublicForm(
       id,
       form.id,
       form.user_id,
-      form.client_id ?? null,
+      resolvedClientId ?? null,
       clientSubmissionId,
       serviceType,
       JSON.stringify(validation.answers),
@@ -238,7 +272,7 @@ export async function submitPublicForm(
   await createNotification(env, {
     userId: form.user_id,
     eventType: 'form_submitted',
-    clientId: form.client_id ?? null,
+    clientId: resolvedClientId ?? null,
     documentId: form.id,
     title: `New submission: ${form.title}`,
     documentTitle: String(form.title ?? ''),
@@ -323,11 +357,12 @@ export async function processSubmission(env: Bindings, submissionId: string): Pr
     );
 
     // Link the researched business back to the CRM record when there is one.
-    if (form?.client_id && research.business_name) {
+    const submissionClientId = submission.client_id ?? form?.client_id ?? null;
+    if (submissionClientId && research.business_name) {
       await dbRun(env, `UPDATE clients SET industry = COALESCE(industry, ?), updated_at = ? WHERE id = ?`, [
         research.industry ?? null,
         now,
-        form.client_id,
+        submissionClientId,
       ]).catch(() => undefined);
     }
 
