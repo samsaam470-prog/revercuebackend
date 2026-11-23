@@ -30,6 +30,9 @@ export interface OrganizerPackage {
 
 export interface OrganizerInput {
   client_name?: string;
+  business_name?: string;
+  business_website?: string;
+  business_description?: string;
   industry?: string;
   service?: string;
   tone?: string;
@@ -201,13 +204,20 @@ export function organizeSections(input: OrganizerInput): Record<string, string> 
   const specific = clientNotes(notes);
   const facts = input.facts ?? {};
   const client = clean(input.client_name ?? '') || 'The client';
-  const industry = clean(input.industry ?? '') || 'their industry';
+  const businessName = clean(input.business_name ?? '');
+  const businessWebsite = String(input.business_website ?? '').trim().slice(0, 500);
+  const businessDescription = clean(input.business_description ?? '');
+  const authorLine = [
+    businessName ? `Prepared by ${businessName}${businessWebsite ? ` (${businessWebsite})` : ''}.` : '',
+    businessDescription ? `The business website describes its work as: ${sentences(businessDescription, 1)}` : '',
+  ].filter(Boolean).join(' ');
+  const industry = clean(input.industry ?? '');
   const service = clean(input.service ?? '');
   const problem = clean(input.problem ?? '');
   const audience = clean(input.target_audience ?? '');
   const timeline = clean(input.timeline ?? '');
   const cta = clean(input.cta ?? '');
-  const scopeClause = clean(input.scope ?? '');
+  const scopeClause = String(input.scope ?? '').trim();
   const valueProp = clean(facts.value_prop ?? '');
   const keyPoints = (facts.key_points ?? []).map(clean).filter(Boolean).slice(0, 6);
   const deliverables = deliverableLines(input.packages ?? []);
@@ -231,72 +241,42 @@ export function organizeSections(input: OrganizerInput): Record<string, string> 
       const lead = `${client}${industry ? ` works in ${industry}` : ''}${service ? ` and is looking for ${service}` : ''}.`;
       copy = [
         lead,
+        authorLine,
         problem ? sentences(problem, 1) : '',
         audience ? `The work is aimed at ${audience.replace(/[.]+$/, '')}.` : '',
-        noteCopy,
-      ]
-        .filter(Boolean)
-        .join(' ');
+        noteCopy ? `The client's public materials state: ${noteCopy}` : '',
+      ].filter(Boolean).join(' ');
     } else if (key === 'about') {
       const lead = `${client}${facts.location ? ` is based in ${clean(facts.location)}` : ''}.`;
       copy = [
         lead,
-        // Quote the client's own description instead of speaking for them.
+        authorLine,
         valueProp ? `Its own site describes it as: ${sentences(valueProp, 1)}` : '',
         keyPoints.length ? `The pages emphasise ${list(keyPoints.slice(0, 3))}.` : '',
-        noteCopy,
-      ]
-        .filter(Boolean)
-        .join(' ');
+        noteCopy ? `The client's public materials state: ${noteCopy}` : '',
+      ].filter(Boolean).join(' ');
     } else if (key === 'scope') {
       if (scopeClause) {
-        // Never rewrite a contract's scope clause into a generic sentence.
-        copy = [
-          sentences(scopeClause, 3),
-          deliverables.length ? `It includes ${list(deliverables.slice(0, 4))}.` : '',
-        ]
-          .filter(Boolean)
-          .join(' ');
-      } else {
-        copy = [
-          `The engagement covers ${service || industry} for ${client}.`,
-          problem ? sentences(problem, 1) : '',
-          deliverables.length ? `It includes ${list(deliverables.slice(0, 4))}.` : '',
-          noteCopy,
-          'Each stage is reviewed with the client before the next one begins.',
-        ]
-          .filter(Boolean)
-          .join(' ');
+        // Keep the user's actual scope wording intact; do not append new obligations.
+        copy = scopeClause;
+      } else if (deliverables.length) {
+        copy = `Scope details supplied: ${list(deliverables.slice(0, 4))}. Confirm the complete scope before sharing.`;
       }
     } else if (key === 'what_is_included') {
-      if (deliverables.length) {
-        copy = `The work includes ${list(deliverables)}. Each item is reviewed with the client before it is handed over.`;
-      } else if (keyPoints.length) {
-        copy = `The work includes ${list(keyPoints)}.`;
-      } else if (noteCopy) {
-        copy = `The work includes the following, drawn from the research: ${noteCopy}`;
-      }
+      if (deliverables.length) copy = `The deliverables supplied are ${list(deliverables)}. Confirm the final list before sharing.`;
     } else if (key === 'process') {
-      const order = sections
-        .map((item) => clean(item).toLowerCase())
-        .filter((item) => item && !['pricing', 'faqs', 'next step', 'embedded questions'].includes(item));
-      copy = order.length
-        ? `The work moves through ${list(order.slice(0, 6))}, with a review at each step before the next one starts.`
-        : noteCopy;
+      // Section headings are not evidence of a real delivery process or approval sequence.
+      copy = '';
     } else if (key === 'timeline') {
-      if (timeline) {
-        copy = `The work runs over ${timeline.replace(/[.]+$/, '')}. You see the dates and checkpoints before the first payment, and any change is agreed in writing.`;
-      } else {
-        copy = noteCopy;
-      }
+      if (timeline) copy = `The timeline provided for this project is ${timeline.replace(/[.]+$/, '')}. Confirm dates and milestones before sharing.`;
     } else if (key === 'next_step') {
       copy = cta ? sentences(cta, 1) : '';
     } else if (key === 'pricing') {
-      // The document's own packages carry the price; never invent one.
+      // The document's own package data carries pricing; never infer an amount.
       copy = '';
     } else {
-      // Unknown section: use the best matching client research, never a placeholder.
-      copy = noteCopy;
+      // Client research must not be repurposed as a legal or commercial clause.
+      copy = '';
     }
 
     const finalCopy = uniqueSentences(copy).trim();
