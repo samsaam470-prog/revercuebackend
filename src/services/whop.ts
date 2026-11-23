@@ -1,13 +1,23 @@
 import type { Bindings } from '../types';
 
+export function isSandbox(env: Bindings): boolean {
+  return String((env as any).WHOP_SANDBOX ?? 'true') === 'true';
+}
+
 export function whopBase(env: Bindings): string {
-  const sandbox = String((env as any).WHOP_SANDBOX ?? 'true') === 'true';
-  return sandbox ? 'https://sandbox-api.whop.com/api/v1' : 'https://api.whop.com/api/v1';
+  return isSandbox(env) ? 'https://sandbox-api.whop.com/api/v1' : 'https://api.whop.com/api/v1';
+}
+
+export function whopApiKey(env: Bindings): string {
+  if (isSandbox(env)) {
+    return String((env as any).WHOP_API ?? (env as any).WHOP_SANDBOX_API ?? '');
+  }
+  return String((env as any).WHOP_PRODUCTION_API ?? (env as any).WHOP_API ?? '');
 }
 
 export function whopHeaders(env: Bindings): Record<string, string> {
   return {
-    Authorization: `Bearer ${(env as any).WHOP_API ?? ''}`,
+    Authorization: `Bearer ${whopApiKey(env)}`,
     'Content-Type': 'application/json',
   };
 }
@@ -21,6 +31,20 @@ export function planIdFor(env: Bindings, planKey: string, growthTrial: boolean):
   };
   if (planKey === 'growth') return growthTrial ? map.growth_trial ?? null : map.growth_standard ?? null;
   return map[planKey] ?? null;
+}
+
+export function planKeyFromWhopId(env: Bindings, whopPlanId: string): string | null {
+  if (!whopPlanId) return null;
+  const entries: Array<[string | undefined, string]> = [
+    [(env as any).WHOP_PLAN_STARTER, 'starter'],
+    [(env as any).WHOP_PLAN_GROWTH_TRIAL, 'growth'],
+    [(env as any).WHOP_PLAN_GROWTH_STANDARD, 'growth'],
+    [(env as any).WHOP_PLAN_SCALE, 'scale'],
+  ];
+  for (const [id, key] of entries) {
+    if (id && id === whopPlanId) return key;
+  }
+  return null;
 }
 
 export async function whopCreateCheckout(env: Bindings, whopPlanId: string, metadata: Record<string, string>): Promise<{ id: string; url: string } | null> {

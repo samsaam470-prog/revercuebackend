@@ -245,7 +245,7 @@ marketing.post('/waitlist', async (c) => {
     });
   } catch (error) {
     console.error('WAITLIST_PERSIST_FAILED', error);
-    return jsonError(c, 500, 'save_failed', 'You could not be added to the waitlist. Please try again.');
+    return jsonError(c, 500, 'save_failed', 'You could not be added to the beta list. Please try again.');
   }
 
   await notifyAdmin(c.env, 'waitlist', email, `Requested plan: ${plan}`);

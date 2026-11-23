@@ -48,13 +48,13 @@ EMAIL_MAX_ATTEMPTS = "5"
 SSE_KEEPALIVE_SECONDS = "15"
 SSE_MAX_SECONDS = "300"
 
-# Whop billing (sandbox). Replace IDs/URLs for production.
-WHOP_SANDBOX = "true"
+# Whop billing (production).
+WHOP_SANDBOX = "false"
 APP_URL = "https://revercue.co.uk"
-WHOP_PLAN_STARTER = "plan_pvFw8RFgyhWF4"
-WHOP_PLAN_GROWTH_TRIAL = "plan_K5YJGV8rN7fUV"
-WHOP_PLAN_GROWTH_STANDARD = "plan_ka3DbHhgt2eP9"
-WHOP_PLAN_SCALE = "plan_o7FrgrytZNCUz"
+WHOP_PLAN_STARTER = "plan_dbw4JIFxq3zvB"
+WHOP_PLAN_GROWTH_TRIAL = "plan_3NiOt8aRNQz7s"
+WHOP_PLAN_GROWTH_STANDARD = "plan_W00KOQQvxNHkr"
+WHOP_PLAN_SCALE = "plan_aDjtVgztfARgY"
 WHOP_GROWTH_PROMO_START = "2026-11-23T00:00:00Z"
 WHOP_GROWTH_PROMO_END = "2026-12-23T00:00:00Z"
 
