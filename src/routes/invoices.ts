@@ -71,8 +71,55 @@ async function nextInvoiceNumber(env: Bindings, userId: string): Promise<string>
 invoices.post('/draft', async (c) => {
   const auth = getAuth(c);
   const body = await c.req.json().catch(() => ({}));
-  if (!Array.isArray(body.line_items) || body.line_items.length === 0) {
-    return jsonError(c, 400, 'invalid_payload', 'At least one line item is required.');
+  if (!Array.isArray(body.line_items) || body.line_items.length === 0 || body.line_items.length > 100) {
+    return jsonError(c, 400, 'invalid_payload', 'Add between 1 and 100 line items.');
+  }
+
+  const lineItems: { description: string; quantity: number; unit_price: number }[] = [];
+  for (const raw of body.line_items) {
+    const description = String(raw?.description ?? '').trim().slice(0, 500);
+    const quantity = Number(raw?.quantity);
+    const unitPrice = Number(raw?.unit_price);
+    if (!description || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(unitPrice) || unitPrice < 0) {
+      return jsonError(c, 400, 'invalid_payload', 'Each line item needs a description, a positive quantity, and a non-negative unit price.');
+    }
+    lineItems.push({ description, quantity, unit_price: unitPrice });
+  }
+
+  const tax = Number(body.tax ?? 0);
+  if (!Number.isFinite(tax) || tax < 0) {
+    return jsonError(c, 400, 'invalid_payload', 'Tax must be a valid non-negative amount.');
+  }
+  const subtotal = lineItems.reduce((sum, item) => sum + item.quantity * item.unit_price, 0);
+  const calculatedTotal = Math.round((subtotal + tax) * 100) / 100;
+  const submittedTotal = Number(body.total);
+  if (!Number.isFinite(submittedTotal) || Math.abs(submittedTotal - calculatedTotal) > 0.01) {
+    return jsonError(c, 400, 'invoice_total_mismatch', 'The invoice total does not match the line items and tax. Check the amounts and try again.');
+  }
+  const dueDate = String(body.due_date ?? '');
+  const parsedDueDate = /^\d{4}-\d{2}-\d{2}$/.test(dueDate) ? new Date(`${dueDate}T00:00:00.000Z`) : null;
+  if (!parsedDueDate || Number.isNaN(parsedDueDate.getTime()) || parsedDueDate.toISOString().slice(0, 10) !== dueDate) {
+    return jsonError(c, 400, 'invalid_payload', 'Choose a valid invoice due date.');
+  }
+
+  const paymentArrangement = body.payment_arrangement;
+  if (!paymentArrangement || typeof paymentArrangement !== 'object') {
+    return jsonError(c, 400, 'invalid_payment_arrangement', 'Choose a payment link or provide bank account details.');
+  }
+  if (paymentArrangement.type === 'link') {
+    try {
+      const paymentUrl = new URL(String(paymentArrangement.url ?? ''));
+      if (!['http:', 'https:'].includes(paymentUrl.protocol)) throw new Error('unsupported protocol');
+    } catch {
+      return jsonError(c, 400, 'invalid_payment_arrangement', 'Enter a valid external payment URL.');
+    }
+  } else if (paymentArrangement.type === 'account') {
+    const details = paymentArrangement.details ?? {};
+    if (!details.bank_name && !details.account_number && !details.iban) {
+      return jsonError(c, 400, 'invalid_payment_arrangement', 'Add at least a bank name, account number, or IBAN.');
+    }
+  } else {
+    return jsonError(c, 400, 'invalid_payment_arrangement', 'Choose a supported payment arrangement.');
   }
 
   const clientId = await resolveClientId(c.env, auth.userId, {
@@ -83,6 +130,17 @@ invoices.post('/draft', async (c) => {
   });
   if (!clientId) {
     return jsonError(c, 400, 'invalid_payload', 'Provide a client_id, or a client_name and client_email.');
+  }
+
+  if (body.linked_contract_id) {
+    const linkedContract = await dbFirst<{ id: string; client_id: string | null }>(
+      c.env,
+      `SELECT id, client_id FROM contracts WHERE id = ? AND user_id = ? LIMIT 1`,
+      [String(body.linked_contract_id), auth.userId]
+    );
+    if (!linkedContract || (linkedContract.client_id && linkedContract.client_id !== clientId)) {
+      return jsonError(c, 400, 'invalid_linked_contract', 'Choose a contract that belongs to this client.');
+    }
   }
 
   const id = generateId('inv');
@@ -98,10 +156,10 @@ invoices.post('/draft', async (c) => {
       clientId,
       body.linked_contract_id ?? null,
       invoiceNumber,
-      JSON.stringify(body.line_items),
-      body.currency ?? 'USD',
-      Number(body.tax ?? 0),
-      Number(body.total ?? 0),
+      JSON.stringify(lineItems),
+      String(body.currency ?? 'USD').slice(0, 8),
+      tax,
+      calculatedTotal,
       JSON.stringify(body.payment_arrangement ?? {}),
       body.due_date ?? null,
       body.notes ?? null,
@@ -156,7 +214,7 @@ invoices.get('/:id', async (c) => {
 invoices.patch('/:id', async (c) => {
   const auth = getAuth(c);
   const body = await c.req.json().catch(() => ({}));
-  const row = await dbFirst<any>(c.env, `SELECT id, status FROM invoices WHERE id = ? AND user_id = ?`, [
+  const row = await dbFirst<any>(c.env, `SELECT id, status, line_items, tax FROM invoices WHERE id = ? AND user_id = ?`, [
     c.req.param('id'),
     auth.userId,
   ]);
@@ -166,6 +224,54 @@ invoices.patch('/:id', async (c) => {
   }
   if (row.status === 'archived') return jsonError(c, 409, 'archived', 'Unarchive the invoice before editing it.');
 
+  let safeTotal = body.total ?? null;
+  let safeLineItems: { description: string; quantity: number; unit_price: number }[] | null = null;
+  if (body.line_items !== undefined || body.tax !== undefined || body.total !== undefined) {
+    const rawItems = body.line_items !== undefined ? body.line_items : parseJson(row.line_items);
+    if (!Array.isArray(rawItems) || rawItems.length === 0 || rawItems.length > 100) {
+      return jsonError(c, 400, 'invalid_payload', 'Add between 1 and 100 line items.');
+    }
+    const normalized = rawItems.map((item: any) => ({
+      description: String(item?.description ?? '').trim(),
+      quantity: Number(item?.quantity),
+      unit_price: Number(item?.unit_price),
+    }));
+    if (normalized.some((item: any) => !item.description || !Number.isFinite(item.quantity) || item.quantity <= 0 || !Number.isFinite(item.unit_price) || item.unit_price < 0)) {
+      return jsonError(c, 400, 'invalid_payload', 'Check each line item description, quantity, and unit price.');
+    }
+    safeLineItems = normalized;
+    const effectiveTax = Number(body.tax !== undefined ? body.tax : row.tax ?? 0);
+    if (!Number.isFinite(effectiveTax) || effectiveTax < 0) return jsonError(c, 400, 'invalid_payload', 'Tax must be a valid non-negative amount.');
+    const subtotal = normalized.reduce((sum: number, item: any) => sum + item.quantity * item.unit_price, 0);
+    const calculated = Math.round((subtotal + effectiveTax) * 100) / 100;
+    if (body.total !== undefined && (!Number.isFinite(Number(body.total)) || Math.abs(Number(body.total) - calculated) > 0.01)) {
+      return jsonError(c, 400, 'invoice_total_mismatch', 'The invoice total does not match the line items and tax.');
+    }
+    safeTotal = calculated;
+  }
+
+  if (body.due_date !== undefined) {
+    const dueDate = String(body.due_date);
+    const parsedDueDate = /^\d{4}-\d{2}-\d{2}$/.test(dueDate) ? new Date(`${dueDate}T00:00:00.000Z`) : null;
+    if (!parsedDueDate || Number.isNaN(parsedDueDate.getTime()) || parsedDueDate.toISOString().slice(0, 10) !== dueDate) {
+      return jsonError(c, 400, 'invalid_payload', 'Choose a valid invoice due date.');
+    }
+  }
+  if (body.payment_arrangement !== undefined) {
+    const arrangement = body.payment_arrangement;
+    if (!arrangement || typeof arrangement !== 'object' || !['link', 'account'].includes(arrangement.type)) {
+      return jsonError(c, 400, 'invalid_payment_arrangement', 'Choose a supported payment arrangement.');
+    }
+    if (arrangement.type === 'link') {
+      try {
+        const paymentUrl = new URL(String(arrangement.url ?? ''));
+        if (!['http:', 'https:'].includes(paymentUrl.protocol)) throw new Error('unsupported protocol');
+      } catch {
+        return jsonError(c, 400, 'invalid_payment_arrangement', 'Enter a valid external payment URL.');
+      }
+    }
+  }
+
   const now = new Date().toISOString();
   await dbRun(
     c.env,
@@ -174,11 +280,11 @@ invoices.patch('/:id', async (c) => {
        tax = COALESCE(?, tax), currency = COALESCE(?, currency), updated_at = ?
      WHERE id = ? AND user_id = ?`,
     [
-      body.line_items ? JSON.stringify(body.line_items) : null,
+      body.line_items ? JSON.stringify(safeLineItems ?? body.line_items) : null,
       body.payment_arrangement ? JSON.stringify(body.payment_arrangement) : null,
       body.due_date ?? null,
       body.notes ?? null,
-      body.total ?? null,
+      safeTotal,
       body.tax ?? null,
       body.currency ?? null,
       now,
