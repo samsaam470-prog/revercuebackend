@@ -5,6 +5,7 @@ import { generateId } from '../utils/ids';
 import { adminAuthMiddleware } from '../middleware/admin-auth';
 import { logAdminAction, requireAdminUser } from '../services/admin-audit';
 import { createNotification } from '../services/notifications';
+import { PLAN_PRICES } from '../config/constants';
 import { retryDeliveryById } from '../services/email';
 import { jsonError } from '../utils/api-errors';
 import { clientIp } from '../utils/http';
@@ -26,11 +27,12 @@ adminActions.post('/waitlist/:id/mark-paid', async (c) => {
   if (row.rows.length === 0) return c.json({ error: 'not_found' }, 404);
   const email = String(row.rows[0].email).toLowerCase();
   const plan = b.plan ?? row.rows[0].plan_requested ?? 'starter';
+  const amount = Number(b.amount ?? 0) > 0 ? Number(b.amount) : (PLAN_PRICES[plan as keyof typeof PLAN_PRICES] ?? 0);
   const user = await tursoQuery(c.env, `SELECT id FROM users WHERE email = ?`, [email]);
   if (user.rows.length === 0) return c.json({ error: 'user_not_found', message: 'The user has not signed up yet.' }, 404);
   const userId = user.rows[0].id;
   await tursoExecute(c.env, `UPDATE users SET plan = ?, plan_expires_at = ?, updated_at = ? WHERE id = ?`, [plan, new Date(Date.now() + 30 * 86400000).toISOString(), new Date().toISOString(), userId]);
-  await tursoExecute(c.env, `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at) VALUES (?, ?, ?, ?, 'USD', 'payoneer', ?, 'paid', ?, ?)`, [generateId('pay'), userId, plan, b.amount ?? 0, b.reference ?? null, new Date().toISOString(), new Date().toISOString()]);
+  await tursoExecute(c.env, `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at) VALUES (?, ?, ?, ?, 'USD', 'payoneer', ?, 'paid', ?, ?)`, [generateId('pay'), userId, plan, amount, b.reference ?? null, new Date().toISOString(), new Date().toISOString()]);
   await tursoExecute(c.env, `UPDATE waitlist SET status = 'paid', paid_at = ? WHERE id = ?`, [new Date().toISOString(), c.req.param('id')]);
   createNotification(c.env, { userId, eventType: 'payment_successful', title: 'Payment received', body: `Your payment for the ${plan} plan was recorded.` }).catch(() => undefined);
   createNotification(c.env, { userId, eventType: 'subscription_activated', title: 'Subscription activated', body: `Your ${plan} plan is now active.` }).catch(() => undefined);
@@ -39,7 +41,7 @@ adminActions.post('/waitlist/:id/mark-paid', async (c) => {
     action: 'waitlist.marked_paid',
     targetType: 'user',
     targetId: userId,
-    metadata: { plan, amount: b.amount ?? 0 },
+    metadata: { plan, amount },
     ip: clientIp(c),
   });
   return c.json({ success: true });
@@ -51,9 +53,10 @@ adminActions.post('/upgrade-requests/:id/confirm', async (c) => {
   if (req.rows.length === 0) return c.json({ error: 'not_found' }, 404);
   const userId = req.rows[0].user_id;
   const plan = b.plan ?? req.rows[0].plan_requested;
+  const amount = Number(b.amount ?? 0) > 0 ? Number(b.amount) : (PLAN_PRICES[plan as keyof typeof PLAN_PRICES] ?? 0);
   const now = new Date().toISOString();
   await tursoExecute(c.env, `UPDATE users SET plan = ?, plan_expires_at = ?, updated_at = ? WHERE id = ?`, [plan, new Date(Date.now() + 30 * 86400000).toISOString(), now, userId]);
-  await tursoExecute(c.env, `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at) VALUES (?, ?, ?, ?, 'USD', 'payoneer', ?, 'paid', ?, ?)`, [generateId('pay'), userId, plan, b.amount ?? 0, b.reference ?? null, now, now]);
+  await tursoExecute(c.env, `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at) VALUES (?, ?, ?, ?, 'USD', 'payoneer', ?, 'paid', ?, ?)`, [generateId('pay'), userId, plan, amount, b.reference ?? null, now, now]);
   await tursoExecute(c.env, `UPDATE payment_requests SET status = 'confirmed' WHERE id = ?`, [c.req.param('id')]);
   createNotification(c.env, { userId, eventType: 'payment_successful', title: 'Payment received', body: `Your payment for the ${plan} plan was recorded.` }).catch(() => undefined);
   createNotification(c.env, { userId, eventType: 'subscription_activated', title: 'Subscription activated', body: `Your ${plan} plan is now active.` }).catch(() => undefined);
@@ -62,7 +65,7 @@ adminActions.post('/upgrade-requests/:id/confirm', async (c) => {
     action: 'upgrade_request.confirmed',
     targetType: 'payment_request',
     targetId: c.req.param('id'),
-    metadata: { user_id: userId, plan, amount: b.amount ?? 0 },
+    metadata: { user_id: userId, plan, amount },
   });
   return c.json({ success: true, user_id: userId, plan });
 });

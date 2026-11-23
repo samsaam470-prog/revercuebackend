@@ -15,7 +15,8 @@ import { runAuthActionSync, getLastSyncStatus, getIdentityCounts } from '../serv
 import { getManagementUser } from '../services/authaction-management';
 import { listRetentionFailures } from '../services/retention';
 import { retryDeliveryById } from '../services/email';
-import { NEWSLETTER_EXPORT_LIMIT, ADMIN_LIST_LIMIT } from '../config/constants';
+import { NEWSLETTER_EXPORT_LIMIT, ADMIN_LIST_LIMIT, DEFAULT_MAX_UPLOAD_BYTES, IMAGE_UPLOAD_TYPES, PLAN_PRICES, PLAN_CURRENCY } from '../config/constants';
+import { putObject, safeFilename } from '../services/storage';
 import type { Bindings } from '../types';
 
 /**
@@ -272,16 +273,19 @@ admin.patch('/users/:id/plan', async (c) => {
     new Date().toISOString(),
     c.req.param('id'),
   ]);
+  const planPrice = PLAN_PRICES[body.plan as keyof typeof PLAN_PRICES] ?? 0;
+  const amount = Number(body.amount ?? 0) > 0 ? Number(body.amount) : planPrice;
   if (body.plan !== 'free') {
     await tursoExecute(
       c.env,
       `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at)
-       VALUES (?, ?, ?, ?, 'USD', 'manual', ?, 'paid', ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, 'manual', ?, 'paid', ?, ?)`,
       [
         generateId('pay'),
         c.req.param('id'),
         body.plan,
-        Number(body.amount ?? 0),
+        amount,
+        PLAN_CURRENCY,
         body.reference ?? null,
         new Date().toISOString(),
         new Date().toISOString(),
@@ -299,7 +303,7 @@ admin.patch('/users/:id/plan', async (c) => {
     action: 'user.plan_changed',
     targetType: 'user',
     targetId: c.req.param('id'),
-    metadata: { plan: body.plan, amount: body.amount ?? 0 },
+    metadata: { plan: body.plan, amount },
     ip: clientIp(c),
   });
   return c.json({ success: true });
@@ -526,6 +530,39 @@ admin.post('/email-deliveries/:id/retry', async (c) => {
   });
   if (result.status === 'not_found') return jsonError(c, 404, 'not_found', 'Delivery not found.');
   return c.json({ success: result.ok, status: result.status, error: result.error ?? null });
+});
+
+// --- Announcement and campaign images --------------------------------------
+
+/**
+ * Stores an announcement image under a public key and returns the stable URL.
+ * Announcement bodies are shown to every targeted user, so the image cannot be
+ * behind a per-user token.
+ */
+admin.post('/uploads/image', async (c) => {
+  const body = await c.req.parseBody();
+  const file = body['file'];
+  if (!(file instanceof File)) return jsonError(c, 400, 'invalid_payload', 'No image provided.');
+  const maxBytes = Number(c.env.MAX_UPLOAD_BYTES ?? DEFAULT_MAX_UPLOAD_BYTES);
+  if (file.size <= 0) return jsonError(c, 400, 'invalid_payload', 'The image is empty.');
+  if (file.size > maxBytes) {
+    return jsonError(c, 413, 'file_too_large', `Images must be under ${Math.round(maxBytes / (1024 * 1024))} MB.`);
+  }
+  if (!IMAGE_UPLOAD_TYPES.includes(file.type)) {
+    return jsonError(c, 400, 'invalid_file_type', 'Upload a PNG, JPEG, WebP or GIF.');
+  }
+
+  const key = `public/announcements/${generateId('ann')}-${safeFilename(file.name, 'image')}`;
+  const uploaded = await putObject(c.env, key, await file.arrayBuffer(), file.type);
+  if (!uploaded.ok) return jsonError(c, 502, 'upload_failed', 'The image could not be stored. Try again.');
+
+  await logAdminAction(c.env, {
+    adminUser: requireAdminUser(c),
+    action: 'announcement.image_uploaded',
+    metadata: { key, size: file.size, mime: file.type },
+    ip: clientIp(c),
+  });
+  return c.json({ success: true, key, url: `/api/files/${key}` }, 201);
 });
 
 // --- Announcements (admin) -------------------------------------------------

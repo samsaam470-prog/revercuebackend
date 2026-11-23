@@ -4,6 +4,17 @@
 export const PLANS = ['free', 'starter', 'growth', 'scale', 'teams'] as const;
 export type Plan = typeof PLANS[number];
 
+// Canonical prices, in USD per month, matching the public pricing page.
+// Teams is priced per team from $99; the others are flat monthly prices.
+export const PLAN_PRICES: Record<Plan, number> = {
+  free: 0,
+  starter: 12,
+  growth: 29,
+  scale: 49,
+  teams: 99,
+};
+export const PLAN_CURRENCY = 'USD';
+
 export const ACTIVE_DOCUMENT_LIMIT: Record<Plan, number> = {
   free: 5,
   starter: 20,
@@ -298,7 +309,7 @@ export const SSE_MIN_POLL_MS = 1000;
 // ===========================================================================
 
 export const DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
-export const IMAGE_UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+export const IMAGE_UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 export const PROOF_UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'application/pdf'];
 export const TEMPLATE_UPLOAD_TYPES = ['text/html', 'text/plain'];
 

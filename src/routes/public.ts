@@ -133,6 +133,24 @@ async function openPublicDocument(
     return jsonError(c, 403, 'forbidden', 'This document is not published yet.');
   }
 
+  // The client name, email and phone live on the client record, not on the
+  // document. Public pages show who the document was prepared for, so attach
+  // them without exposing the client's owner or anything else private.
+  if (row.client_id) {
+    const client = await dbFirst<any>(
+      c.env,
+      `SELECT name, email, phone, website_url, industry FROM clients WHERE id = ? LIMIT 1`,
+      [row.client_id]
+    );
+    if (client) {
+      row.client_name = client.name ?? null;
+      row.client_email = client.email ?? null;
+      row.client_phone = client.phone ?? null;
+      row.client_website = client.website_url ?? null;
+      row.client_industry = client.industry ?? null;
+    }
+  }
+
   const password = await passwordRequired(c.env, type, row);
   let accessGranted = true;
   if (password.enabled) {
@@ -143,6 +161,9 @@ async function openPublicDocument(
   }
 
   const plan = await getUserPlan(c.env, row.user_id);
+  // The public-page credit line is part of the Free and Starter experience and
+  // is removed on Growth and above, as the features page says.
+  row.show_credit = !['growth', 'scale', 'teams'].includes(plan);
   let visitId: string | null = null;
   if (isTrackedType(type)) {
     const started = await startVisit(c.env, {
@@ -177,20 +198,6 @@ async function openPublicDocument(
   return { row, plan, accessGranted, visitId };
 }
 
-/** Strips private fields before a public document is returned. */
-function publicView(type: DocType, row: any): any {
-  const {
-    password_hash,
-    proof_screenshot_key,
-    user_id,
-    ...rest
-  } = row;
-  if (type === 'proposal' || type === 'contract' || type === 'invoice' || type === 'form') {
-    return rest;
-  }
-  return row;
-}
-
 function parseJson(value: unknown): any {
   if (!value) return {};
   if (typeof value === 'object') return value;
@@ -199,6 +206,54 @@ function parseJson(value: unknown): any {
   } catch {
     return {};
   }
+}
+
+/**
+ * Strips private fields before a public document is returned.
+ *
+ * `content` is stored as a JSON string in SQLite. The client pages render
+ * `content.blocks`, so returning the raw string made every published document
+ * look empty. It is parsed here once, and the brief fields are also lifted to
+ * the top level for the public page's fallback rendering.
+ */
+function publicView(type: DocType, row: any): any {
+  const {
+    password_hash,
+    proof_screenshot_key,
+    user_id,
+    ...rest
+  } = row;
+
+  const content = parseJson(rest.content);
+  const shaped: any = { ...rest, content };
+
+  if (type === 'proposal') {
+    shaped.problem = rest.problem ?? content.problem ?? undefined;
+    shaped.sections = rest.sections ?? content.sections ?? undefined;
+    shaped.packages = rest.packages ?? content.packages ?? undefined;
+    shaped.faqs = rest.faqs ?? content.faqs ?? undefined;
+    shaped.questions = rest.questions ?? content.questions ?? undefined;
+    shaped.timeline_length = rest.timeline_length ?? content.timeline ?? undefined;
+    shaped.cta = rest.cta ?? content.call_to_action ?? undefined;
+    shaped.currency = rest.currency ?? content.currency ?? undefined;
+  }
+  if (type === 'contract') {
+    shaped.scope = rest.scope ?? content.scope ?? undefined;
+    shaped.payment_terms = rest.payment_terms ?? content.payment_terms ?? undefined;
+    shaped.revisions = rest.revisions ?? content.revisions ?? undefined;
+    shaped.cancellation = rest.cancellation ?? content.cancellation ?? undefined;
+  }
+  if (type === 'invoice') {
+    shaped.line_items = parseJson(rest.line_items);
+    shaped.payment_arrangement = parseJson(rest.payment_arrangement);
+  }
+  if (type === 'form') {
+    shaped.questions = parseJson(rest.questions);
+    shaped.branching = parseJson(rest.branching);
+    shaped.thank_you_config = rest.thank_you_config ? parseJson(rest.thank_you_config) : null;
+  }
+
+  return shaped;
 }
 
 // ---------------------------------------------------------------------------

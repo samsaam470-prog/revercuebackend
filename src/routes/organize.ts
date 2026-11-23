@@ -1,5 +1,6 @@
-﻿import { Hono } from 'hono';
+import { Hono } from 'hono';
 import { fixWithPatterns } from '../services/patterns';
+import { organizeSections, normaliseSection } from '../services/organizer';
 import { resolveVisuals } from '../services/visuals';
 import { userAuthMiddleware } from '../middleware/user-auth';
 import type { Bindings } from '../types';
@@ -12,6 +13,16 @@ organize.post('/', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const industry = body.industry ? String(body.industry) : 'general';
   const service = body.service ? String(body.service) : 'freelance services';
+  const research = body.research ?? body.layer2 ?? {};
+  const notes = Array.isArray(research.notes)
+    ? research.notes
+    : Array.isArray(body.notes)
+      ? body.notes
+      : [];
+  const facts = research.facts ?? body.facts ?? {};
+  const requested: string[] = Array.isArray(body.sections)
+    ? body.sections.map((section: unknown) => String(section))
+    : [];
 
   try {
     const fixed = await fixWithPatterns(
@@ -22,14 +33,34 @@ organize.post('/', async (c) => {
         industry,
         service,
         tone: String(body.tone ?? 'formal'),
-        sections: Array.isArray(body.sections) ? body.sections : [],
+        sections: requested,
       },
-      body.layer2 ?? body.research ?? {}
+      {
+        ...research,
+        notes,
+        sections: requested.map((section) => ({ id: normaliseSection(section) })),
+      }
     );
-    const inputSections = Array.isArray(body.sections) ? body.sections : [];
-    const sectionsObj: Record<string, string> = {};
-    for (const s of inputSections) sectionsObj[String(s).toLowerCase().replace(/[^a-z0-9]+/g, '_')] = '';
-    return c.json({ success: true, result: fixed, sections: sectionsObj });
+
+    const sections = organizeSections({
+      client_name: body.client_name ? String(body.client_name) : undefined,
+      industry,
+      service,
+      tone: String(body.tone ?? 'formal'),
+      sections: requested,
+      notes,
+      facts,
+    });
+
+    // Keep the organised copy on the result as well, so a caller that only
+    // reads `result` still gets the writing and not just the pattern fixes.
+    return c.json({
+      success: true,
+      result: { ...fixed, organized_sections: sections },
+      sections,
+      notes_used: notes.length,
+      tone: String(body.tone ?? fixed.tone ?? 'formal'),
+    });
   } catch (err: any) {
     return c.json({ error: 'organize_failed', message: err.message ?? 'Unknown' }, 500);
   }
