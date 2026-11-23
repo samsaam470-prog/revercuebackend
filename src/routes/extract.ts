@@ -1,4 +1,3 @@
-﻿import { Hono } from 'hono';
 import { runLayer1, fetchVisualAssets } from '../services/pipeline';
 import { userAuthMiddleware } from '../middleware/user-auth';
 import { checkRateLimit } from '../services/rate-limit';
@@ -27,6 +26,7 @@ extract.post('/', async (c) => {
       service,
       client_website: body.client_website,
       user_website: body.user_website,
+      business_name: body.business_name,
       location: body.location,
     });
     // Flatten notes/images to top level for frontend compatibility while keeping result.

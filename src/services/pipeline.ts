@@ -1,4 +1,3 @@
-import type { Bindings } from '../types';
 import { dbFirst, dbRun } from '../utils/db';
 import { safeFetchPublic } from '../utils/url-safety';
 
@@ -22,6 +21,7 @@ export interface ExtractInput {
   service: string;
   client_website?: string;
   user_website?: string;
+  business_name?: string;
   location?: string;
 }
 
@@ -45,6 +45,9 @@ export interface ExtractResult {
   samples: { title: string; url: string; snippet: string }[];
   notes: { title: string; body: string; source?: string; kind?: 'client' | 'web' | 'background' }[];
   images: string[];
+  author_business_name?: string;
+  author_description?: string;
+  author_website?: string;
 }
 
 interface FetchOutcome {
@@ -251,8 +254,11 @@ export async function runLayer1(env: Bindings, input: ExtractInput): Promise<Ext
   );
   const serp = relevantSamples(searchResults, input.client_name, input.client_website);
 
-  let meta = { title: '', description: '', image: null as string | null, h2: [] as string[] };
-  if (input.client_website) meta = await fetchClientMetadata(input.client_website);
+  const emptyMeta = { title: '', description: '', image: null as string | null, h2: [] as string[] };
+  const [meta, userMeta] = await Promise.all([
+    input.client_website ? fetchClientMetadata(input.client_website) : Promise.resolve(emptyMeta),
+    input.user_website ? fetchClientMetadata(input.user_website) : Promise.resolve(emptyMeta),
+  ]);
 
   const openverse =
     (await fetchOpenverseImage(`${input.industry} ${input.service}`)) ??
@@ -302,6 +308,9 @@ export async function runLayer1(env: Bindings, input: ExtractInput): Promise<Ext
     samples: serp,
     notes: notes.slice(0, 8),
     images: openverse?.url ? [openverse.url] : [],
+    author_business_name: input.business_name || userMeta.title || undefined,
+    author_description: userMeta.description || undefined,
+    author_website: input.user_website || undefined,
   };
 }
 

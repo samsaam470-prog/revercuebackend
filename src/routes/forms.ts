@@ -1,4 +1,3 @@
-import { Hono } from 'hono';
 import { dbFirst, dbQuery, dbRun } from '../utils/db';
 import { generateId, generatePublicId } from '../utils/ids';
 import { userAuthMiddleware, getAuth } from '../middleware/user-auth';
@@ -106,7 +105,28 @@ forms.get('/', async (c) => {
 forms.post('/draft', async (c) => {
   const auth = getAuth(c);
   const body = await c.req.json().catch(() => ({}));
-  if (!body.title) return jsonError(c, 400, 'invalid_payload', 'A form title is required.');
+  if (!String(body.title ?? '').trim()) return jsonError(c, 400, 'invalid_payload', 'A form title is required.');
+  const allowedQuestionTypes = new Set(['short_text', 'long_text', 'file_upload', 'single_choice', 'multiple_choice', 'combined', 'dropdown']);
+  const questions = Array.isArray(body.questions) ? body.questions : [];
+  if (questions.length > 100) return jsonError(c, 400, 'invalid_payload', 'A form can contain up to 100 questions.');
+  const questionIds = new Set<string>();
+  for (const question of questions) {
+    const id = String(question?.id ?? '').trim();
+    const text = String(question?.text ?? '').trim();
+    const type = String(question?.type ?? 'short_text');
+    if (!id || !text || !allowedQuestionTypes.has(type) || questionIds.has(id)) {
+      return jsonError(c, 400, 'invalid_question', 'Every question needs a unique ID, a label, and a supported response type.');
+    }
+    questionIds.add(id);
+    if (['single_choice', 'multiple_choice', 'dropdown'].includes(type)) {
+      const optionLabels = Array.isArray(question.options)
+        ? question.options.map((option: any) => String(option?.label ?? option ?? '').trim()).filter(Boolean)
+        : [];
+      if (optionLabels.length < 2) {
+        return jsonError(c, 400, 'invalid_question_options', 'Choice questions need at least two non-empty options.');
+      }
+    }
+  }
 
   if (branchingIsSet(body.branching)) {
     const adaptive = await checkAdaptiveFormLimit(c.env, auth.userId);
@@ -141,7 +161,7 @@ forms.post('/draft', async (c) => {
       clientId,
       String(body.title).slice(0, 300),
       body.description ?? null,
-      JSON.stringify(body.questions ?? []),
+      JSON.stringify(questions),
       JSON.stringify(body.branching ?? {}),
       now,
       now,

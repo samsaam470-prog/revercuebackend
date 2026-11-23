@@ -1,4 +1,3 @@
-import { Hono } from 'hono';
 import bcrypt from 'bcryptjs';
 import { dbQuery, dbFirst, dbRun } from '../utils/db';
 import { tursoQuery } from '../utils/turso';
@@ -114,6 +113,8 @@ proposals.post('/draft', async (c) => {
     industry: b.industry ?? null,
     service: b.service ?? null,
     client_website: b.client_website ?? null,
+    user_website: b.own_website ?? b.user_website ?? null,
+    business_name: b.business_name ?? null,
     sections: b.sections ?? [],
     packages: b.packages ?? [],
     currency: b.currency ?? 'USD',
