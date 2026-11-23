@@ -20,7 +20,7 @@ B2_KEY_ID = "00525f7d4d52f090000000001"
 B2_S3_ENDPOINT = "https://s3.us-east-005.backblazeb2.com"
 COOPER_INBOX_ID = "revercue@cooperemail.com"
 FRONTEND_ORIGIN = "https://revercue.co.uk"
-ALLOWED_ORIGINS = "https://revercue.co.uk,https://revercue.pages.dev,https://www.revercue.co.uk,https://revercue.com,https://www.revercue.com"
+ALLOWED_ORIGINS = "https://revercue.co.uk,https://revercue.pages.dev,https://www.revercue.co.uk,https://revercue.com,https://www.revercue.com,https://adminrevercue.pages.dev"
 # Canonical public API origin. AUTHACTION_AUDIENCE intentionally remains the
 # existing API resource identifier; a custom hostname does not change it.
 API_BASE_URL = "https://api.revercue.co.uk"
@@ -55,7 +55,7 @@ B2_KEY_ID = "00525f7d4d52f090000000001"
 B2_S3_ENDPOINT = "https://s3.us-east-005.backblazeb2.com"
 COOPER_INBOX_ID = "revercue@cooperemail.com"
 FRONTEND_ORIGIN = "https://revercue.co.uk"
-ALLOWED_ORIGINS = "https://revercue.co.uk,https://revercue.pages.dev,https://www.revercue.co.uk,https://revercue.com,https://www.revercue.com"
+ALLOWED_ORIGINS = "https://revercue.co.uk,https://revercue.pages.dev,https://www.revercue.co.uk,https://revercue.com,https://www.revercue.com,https://adminrevercue.pages.dev"
 # Canonical public API origin. AUTHACTION_AUDIENCE intentionally remains the
 # existing API resource identifier; a custom hostname does not change it.
 API_BASE_URL = "https://api.revercue.co.uk"
