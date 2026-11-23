@@ -126,7 +126,13 @@ files.post('/upload', userAuthMiddleware, async (c) => {
     return jsonError(c, 403, 'plan_limit_reached', `Storage limit reached (${limitMb} MB on your plan).`);
   }
 
-  const key = `uploads/${auth.userId}/${purpose}/${generateId('f')}-${safeFilename(file.name)}`;
+  // Document images are embedded in proposals/contracts that render on public
+  // pages and in PDFs, so they must live under a public key and need no
+  // short-lived token. Other uploads stay private to the owner.
+  const isPublic = purpose === 'document-image' || purpose === 'image' || purpose.startsWith('public');
+  const key = isPublic
+    ? `public/documents/${auth.userId}/${generateId('img')}-${safeFilename(file.name)}`
+    : `uploads/${auth.userId}/${purpose}/${generateId('f')}-${safeFilename(file.name)}`;
   const uploaded = await putObject(c.env, key, await file.arrayBuffer(), file.type || 'application/octet-stream');
   if (!uploaded.ok) return jsonError(c, 502, 'upload_failed', 'The file could not be stored. Try again.');
 
@@ -136,6 +142,9 @@ files.post('/upload', userAuthMiddleware, async (c) => {
     [generateId('fu'), auth.userId, key, file.size, new Date().toISOString()]
   ).catch((error) => console.error('FILE_UPLOAD_RECORD_FAILED', error));
 
+  if (isPublic) {
+    return c.json({ success: true, key, url: `/api/files/${key}` }, 201);
+  }
   const token = await createFileToken(c.env, key);
   return c.json({ success: true, key, url: `/api/files/${key}?token=${encodeURIComponent(token)}` }, 201);
 });
