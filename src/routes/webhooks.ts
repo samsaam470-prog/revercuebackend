@@ -6,21 +6,28 @@ import type { Bindings } from '../types';
 
 const webhooks = new Hono<{ Bindings: Bindings }>();
 
-async function verifySignature(env: Bindings, raw: string, sig: string | null): Promise<boolean> {
+async function verifySignature(env: Bindings, raw: string, headers: Headers): Promise<boolean> {
   const secret = (env as any).WHOP_WEBHOOK_SECRET;
   if (!secret) return true; // allow if not configured (dev)
-  if (!sig) return false;
+  const webhookId = headers.get('webhook-id');
+  const webhookTimestamp = headers.get('webhook-timestamp');
+  const webhookSignature = headers.get('webhook-signature');
+  if (!webhookId || !webhookTimestamp || !webhookSignature) return false;
+  const signedContent = `${webhookId}.${webhookTimestamp}.${raw}`;
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const mac = await crypto.subtle.sign('HMAC', key, enc.encode(raw));
-  const hex = Array.from(new Uint8Array(mac)).map((b) => b.toString(16).padStart(2, '0')).join('');
-  return sig === hex || sig === `sha256=${hex}`;
+  const mac = await crypto.subtle.sign('HMAC', key, enc.encode(signedContent));
+  const expected = btoa(String.fromCharCode(...new Uint8Array(mac)));
+  // webhook-signature may contain multiple space-separated v1,<sig> entries
+  return webhookSignature.split(' ').some((part) => {
+    const [version, sig] = part.split(',');
+    return version === 'v1' && sig === expected;
+  });
 }
 
 webhooks.post('/whop', async (c) => {
   const raw = await c.req.text();
-  const sig = c.req.header('whop-signature') ?? c.req.header('x-whop-signature') ?? null;
-  if (!(await verifySignature(c.env, raw, sig))) return jsonError(c, 401, 'invalid_signature', 'Invalid webhook signature.');
+  if (!(await verifySignature(c.env, raw, c.req.raw.headers))) return jsonError(c, 401, 'invalid_signature', 'Invalid webhook signature.');
 
   let event: any;
   try { event = JSON.parse(raw); } catch { return jsonError(c, 400, 'invalid_payload', 'Invalid JSON.'); }
