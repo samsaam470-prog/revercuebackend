@@ -124,6 +124,26 @@ export type SubmitResult =
     }
   | { ok: false; status: 400 | 404 | 409 | 410; error: string; message: string };
 
+/** Question text plus the client's answer, so the prompt reads as a brief. */
+function labelledBrief(questions: unknown, answers: Record<string, any>): string {
+  if (!Array.isArray(questions)) return '';
+  const lines: string[] = [];
+  for (const question of questions) {
+    const id = String(question?.id ?? '');
+    if (!id) continue;
+    const value = answers[id];
+    const answer = Array.isArray(value)
+      ? value.map((item) => String(item).trim()).filter(Boolean).join(', ')
+      : value === null || value === undefined
+        ? ''
+        : String(value).trim();
+    if (!answer) continue;
+    const label = String(question?.text ?? 'Answer').trim().replace(/[?:]+\s*$/, '');
+    lines.push(`${label}: ${answer}`);
+  }
+  return lines.join('; ');
+}
+
 export async function submitPublicForm(
   env: Bindings,
   input: {
@@ -183,7 +203,10 @@ export async function submitPublicForm(
   }
 
   const serviceType = String(input.serviceType ?? validation.answers.service_type ?? 'project').slice(0, 100);
-  const prompt = generatePrompt(serviceType, validation.answers as Record<string, any>);
+  const prompt = generatePrompt(serviceType, {
+    ...(validation.answers as Record<string, any>),
+    requirements: labelledBrief(questions, validation.answers) || validation.answers.requirements,
+  });
   const id = generateId('sub');
   const now = new Date().toISOString();
 

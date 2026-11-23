@@ -1,5 +1,4 @@
-﻿import { dbQuery, dbFirst } from '../utils/db';
-import { tursoQuery } from '../utils/turso';
+import { dbQuery, dbFirst } from '../utils/db';
 import { learnFromSamples } from './sample-learning';
 import type { Bindings } from '../types';
 
@@ -22,32 +21,109 @@ export interface UserPatterns {
   saved_packages: any[];
 }
 
+function parseJson(value: unknown): any {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string' || !value) return {};
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Optional context, never a requirement.
+ *
+ * Every pattern comes from a table the product may not have populated yet, and
+ * a schema mismatch here used to fail the whole organize call: the route
+ * answered 500 and every draft silently fell back to ungrounded copy. Each
+ * query now degrades to its default instead of taking the request down.
+ */
+async function optional<T>(promise: Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await promise;
+  } catch (error) {
+    console.error('PATTERN_QUERY_FAILED', (error as Error)?.message ?? error);
+    return fallback;
+  }
+}
+
 async function medianFollowUpDays(env: Bindings, userId: string): Promise<number> {
-  const rows = await dbQuery<{ days: number }>(
-    env,
-    `SELECT CAST((julianday(follow_up_date) - julianday(created_at)) AS INTEGER) as days FROM communication_log WHERE user_id = ? AND follow_up_date IS NOT NULL AND follow_up_done = 1 ORDER BY created_at DESC LIMIT 20`,
-    [userId]
+  const rows = await optional(
+    dbQuery<{ days: number }>(
+      env,
+      `SELECT CAST((julianday(follow_up_date) - julianday(created_at)) AS INTEGER) as days FROM communication_log WHERE user_id = ? AND follow_up_date IS NOT NULL AND follow_up_done = 1 ORDER BY created_at DESC LIMIT 20`,
+      [userId]
+    ),
+    [] as { days: number }[]
   );
   if (rows.length === 0) return 2;
   const sorted = rows.map((r) => Number(r.days)).filter((d) => d >= 0 && d < 30).sort((a, b) => a - b);
   return sorted.length === 0 ? 2 : sorted[Math.floor(sorted.length / 2)];
 }
 
+/** The brief's tone and template live inside the proposal content JSON. */
+async function latestProposalContent(env: Bindings, userId: string): Promise<any> {
+  const row = await optional(
+    dbFirst<{ content: string }>(
+      env,
+      `SELECT content FROM proposals WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`,
+      [userId]
+    ),
+    null
+  );
+  return parseJson(row?.content);
+}
+
+async function usualTemplate(env: Bindings, userId: string): Promise<string | null> {
+  const rows = await optional(
+    dbQuery<{ content: string }>(
+      env,
+      `SELECT content FROM proposals WHERE user_id = ? AND status = 'published' ORDER BY created_at DESC LIMIT 20`,
+      [userId]
+    ),
+    [] as { content: string }[]
+  );
+  for (const row of rows) {
+    const template = parseJson(row.content)?.template_id;
+    if (typeof template === 'string' && template) return template;
+  }
+  return null;
+}
+
 export async function loadUserPatterns(env: Bindings, ctx: PatternContext): Promise<UserPatterns> {
-  const toneRow = await dbFirst<{ tone: string; c: number }>(env, `SELECT tone, COUNT(*) as c FROM proposals WHERE user_id = ? GROUP BY tone ORDER BY c DESC LIMIT 1`, [ctx.user_id]);
-  const usual_tone = toneRow?.tone ?? ctx.tone ?? 'formal';
+  const latest = await latestProposalContent(env, ctx.user_id);
+  const usual_tone = (typeof latest?.tone === 'string' && latest.tone) || ctx.tone || 'formal';
   const usual_follow_up_days = await medianFollowUpDays(env, ctx.user_id);
-  const pkgRow = await dbQuery<{ c: number }>(env, `SELECT COUNT(*) as c FROM saved_packages WHERE user_id = ?`, [ctx.user_id]);
+  const pkgRow = await optional(
+    dbQuery<{ c: number }>(env, `SELECT COUNT(*) as c FROM saved_packages WHERE user_id = ?`, [ctx.user_id]),
+    [] as { c: number }[]
+  );
   const usual_packages_count = Math.max(Number(pkgRow[0]?.c ?? 0), 3);
-  const templateRow = await dbFirst<{ template_id: string }>(env, `SELECT template_id FROM proposals WHERE user_id = ? AND status IN ('published','accepted') AND template_id IS NOT NULL GROUP BY template_id ORDER BY COUNT(*) DESC LIMIT 1`, [ctx.user_id]);
-  const savedFaqs = await dbQuery<{ question: string; answer: string }>(env, `SELECT question, answer FROM saved_faqs WHERE user_id = ? ORDER BY last_used_at DESC NULLS LAST LIMIT 10`, [ctx.user_id]);
-  const savedPackages = await dbQuery<any>(env, `SELECT name, price, currency, deliverables, description, is_recommended FROM saved_packages WHERE user_id = ? ORDER BY last_used_at DESC NULLS LAST LIMIT 10`, [ctx.user_id]);
-  const winningFaqRows = await dbQuery<{ question: string }>(env, `SELECT question FROM saved_faqs WHERE user_id = ? GROUP BY question ORDER BY COUNT(*) DESC LIMIT 5`, [ctx.user_id]);
+  const savedFaqs = await optional(
+    dbQuery<{ question: string; answer: string }>(
+      env,
+      `SELECT question, answer FROM saved_faqs WHERE user_id = ? ORDER BY last_used_at DESC LIMIT 10`,
+      [ctx.user_id]
+    ),
+    [] as { question: string; answer: string }[]
+  );
+  const savedPackages = await optional(
+    dbQuery<any>(
+      env,
+      `SELECT name, price, currency, deliverables, description, is_recommended FROM saved_packages WHERE user_id = ? ORDER BY last_used_at DESC LIMIT 10`,
+      [ctx.user_id]
+    ),
+    [] as any[]
+  );
   return {
-    usual_tone, usual_follow_up_days, usual_packages_count,
-    usual_template: templateRow?.template_id ?? null,
-    winning_faqs: winningFaqRows.map((r) => r.question),
-    saved_faqs: savedFaqs, saved_packages: savedPackages,
+    usual_tone,
+    usual_follow_up_days,
+    usual_packages_count,
+    usual_template: await usualTemplate(env, ctx.user_id),
+    winning_faqs: savedFaqs.slice(0, 5).map((faq) => faq.question),
+    saved_faqs: savedFaqs,
+    saved_packages: savedPackages,
   };
 }
 

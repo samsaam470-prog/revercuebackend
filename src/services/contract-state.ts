@@ -163,12 +163,17 @@ export function statusAfterFreelancerSignature(snapshot: SigningSnapshot): Contr
   return snapshot.published ? CONTRACT_STATUS.AWAITING_CLIENT_SIGNATURE : CONTRACT_STATUS.DRAFT;
 }
 
-export function statusAfterPublish(): ContractStatus {
-  return CONTRACT_STATUS.AWAITING_CLIENT_SIGNATURE;
+/**
+ * Contract rows keep two values: `status` stays inside the table's legacy
+ * CHECK list, while `signing_status` carries the electronic-signature
+ * lifecycle that the rest of the code derives state from.
+ */
+export function statusAfterPublish(): { status: string; signingStatus: ContractStatus } {
+  return { status: 'published', signingStatus: CONTRACT_STATUS.AWAITING_CLIENT_SIGNATURE };
 }
 
-export function statusAfterClientSignature(): ContractStatus {
-  return CONTRACT_STATUS.FULLY_SIGNED;
+export function statusAfterClientSignature(): { status: string; signingStatus: ContractStatus } {
+  return { status: 'approved', signingStatus: CONTRACT_STATUS.FULLY_SIGNED };
 }
 
 export function consentRequired(consent: unknown): void {

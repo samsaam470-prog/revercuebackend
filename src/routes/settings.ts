@@ -29,6 +29,7 @@ import {
   IMAGE_UPLOAD_TYPES,
   DEFAULT_MAX_UPLOAD_BYTES,
 } from '../config/constants';
+import { countActiveDocuments } from '../services/plan-limits';
 import type { Bindings } from '../types';
 
 const settings = new Hono<{ Bindings: Bindings }>();
@@ -125,9 +126,7 @@ settings.get('/plan', async (c) => {
   const plan = String(user.rows[0]?.plan ?? 'free');
 
   const [activeDocs, archived, protectedDocs, storage, payments] = await Promise.all([
-    dbFirst<{ c: number }>(c.env, `SELECT COUNT(*) as c FROM proposals WHERE user_id = ? AND status = 'published'`, [
-      auth.userId,
-    ]),
+    countActiveDocuments(c.env, auth.userId).then((count) => ({ c: count })),
     dbFirst<{ c: number }>(c.env, `SELECT COUNT(*) as c FROM proposals WHERE user_id = ? AND status = 'archived'`, [
       auth.userId,
     ]),

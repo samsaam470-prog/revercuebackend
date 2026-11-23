@@ -28,6 +28,7 @@ import {
 } from '../services/contract-signing';
 import { createDocumentLink } from '../services/document-links';
 import { getTrackingSummary } from '../services/tracking';
+import { activeDocumentLimitBody, checkActiveDocumentLimit } from '../services/plan-limits';
 import { SigningError } from '../services/contract-state';
 import type { Bindings } from '../types';
 
@@ -77,7 +78,7 @@ contracts.get('/', async (c) => {
   let where = `user_id = ?`;
   const args: any[] = [auth.userId];
   if (status) {
-    where += ` AND status = ?`;
+    where += ` AND COALESCE(signing_status, status) = ?`;
     args.push(status);
   } else if ((c.req.query('filter') ?? '') === 'active') {
     where += ` AND status != 'archived'`;
@@ -86,7 +87,7 @@ contracts.get('/', async (c) => {
   const totalRow = await dbFirst<{ c: number }>(c.env, `SELECT COUNT(*) as c FROM contracts WHERE ${where}`, args);
   const rows = await dbQuery(
     c.env,
-    `SELECT id, title, client_id, status, public_id, published_at, signed_at, created_at, updated_at
+    `SELECT id, title, client_id, COALESCE(signing_status, status) AS status, public_id, published_at, signed_at, created_at, updated_at
      FROM contracts WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
     [...args, pagination.limit, pagination.offset]
   );
@@ -247,6 +248,15 @@ contracts.post('/:id/sign', async (c) => {
 contracts.post('/:id/publish', async (c) => {
   const auth = getAuth(c);
   try {
+    const row = await dbFirst<{ id: string; status: string; published_at: string | null }>(
+      c.env,
+      `SELECT id, status, published_at FROM contracts WHERE id = ? AND user_id = ?`,
+      [c.req.param('id'), auth.userId]
+    );
+    if (!row) return jsonError(c, 404, 'not_found', 'Contract not found.');
+    const active = await checkActiveDocumentLimit(c.env, auth.userId, Boolean(row.published_at));
+    if (!active.allowed) return c.json(activeDocumentLimitBody(active), 403);
+
     const result = await publishSignedContract(c.env, c.req.param('id'), auth.userId, {
       ip: clientIp(c),
       userAgent: clientUserAgent(c),
@@ -347,12 +357,12 @@ contracts.post('/:id/duplicate', async (c) => {
 
 contracts.post('/:id/archive', async (c) => {
   const auth = getAuth(c);
-  const row = await dbFirst<any>(c.env, `SELECT id, status FROM contracts WHERE id = ? AND user_id = ?`, [
+  const row = await dbFirst<any>(c.env, `SELECT id, status, signing_status FROM contracts WHERE id = ? AND user_id = ?`, [
     c.req.param('id'),
     auth.userId,
   ]);
   if (!row) return jsonError(c, 404, 'not_found', 'Contract not found.');
-  if (row.status === 'fully_signed') {
+  if ((row.signing_status ?? row.status) === 'fully_signed') {
     return jsonError(c, 409, 'contract_signed', 'A fully signed contract cannot be archived; export it instead.');
   }
   try {
@@ -411,7 +421,7 @@ contracts.get('/:id/pdf', async (c) => {
   ]);
   if (!contract) return jsonError(c, 404, 'not_found', 'Contract not found.');
 
-  if (contract.status === 'fully_signed') {
+  if ((contract.signing_status ?? contract.status) === 'fully_signed') {
     try {
       const pdf = await getSignedPdfForOwner(c.env, contract.id, auth.userId);
       if (pdf) return pdfResponse(pdf.bytes, pdf.filename, 'attachment');
@@ -429,12 +439,12 @@ contracts.get('/:id/pdf', async (c) => {
 
 contracts.get('/:id/signed-pdf-link', async (c) => {
   const auth = getAuth(c);
-  const contract = await dbFirst<any>(c.env, `SELECT id, status FROM contracts WHERE id = ? AND user_id = ?`, [
+  const contract = await dbFirst<any>(c.env, `SELECT id, status, signing_status FROM contracts WHERE id = ? AND user_id = ?`, [
     c.req.param('id'),
     auth.userId,
   ]);
   if (!contract) return jsonError(c, 404, 'not_found', 'Contract not found.');
-  if (contract.status !== 'fully_signed') {
+  if ((contract.signing_status ?? contract.status) !== 'fully_signed') {
     return jsonError(c, 409, 'not_signed', 'The contract is not fully signed yet.');
   }
   const version = await getLatestVersion(c.env, contract.id);
@@ -472,12 +482,12 @@ contracts.get('/:id/tracking', async (c) => {
 
 contracts.delete('/:id', async (c) => {
   const auth = getAuth(c);
-  const contract = await dbFirst<any>(c.env, `SELECT id, status FROM contracts WHERE id = ? AND user_id = ?`, [
+  const contract = await dbFirst<any>(c.env, `SELECT id, status, signing_status FROM contracts WHERE id = ? AND user_id = ?`, [
     c.req.param('id'),
     auth.userId,
   ]);
   if (!contract) return jsonError(c, 404, 'not_found', 'Contract not found.');
-  if (contract.status === 'fully_signed') {
+  if ((contract.signing_status ?? contract.status) === 'fully_signed') {
     return jsonError(
       c,
       409,

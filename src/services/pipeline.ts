@@ -43,7 +43,7 @@ export interface ExtractResult {
   location: string | null;
   wiki_attribution: string;
   samples: { title: string; url: string; snippet: string }[];
-  notes: { title: string; body: string; source?: string }[];
+  notes: { title: string; body: string; source?: string; kind?: 'client' | 'web' | 'background' }[];
   images: string[];
 }
 
@@ -211,11 +211,45 @@ async function fetchIcons(services: string[]): Promise<{ service: string; icon: 
 }
 
 // --- Layer 1 ---------------------------------------------------------------
+
+function hostOf(url: string | undefined): string {
+  if (!url) return '';
+  try {
+    return new URL(url).hostname.replace(/^www\./i, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * A web search for a small client name matches unrelated businesses with the
+ * same words. Only results that actually mention the client (by name or by
+ * domain) are research about that client; the rest is noise that made drafts
+ * read as filler.
+ */
+function relevantSamples(
+  samples: { title: string; url: string; snippet: string }[],
+  clientName: string,
+  clientWebsite?: string
+): { title: string; url: string; snippet: string }[] {
+  const name = clientName.trim().toLowerCase();
+  const host = hostOf(clientWebsite);
+  if (!name) return [];
+  return samples.filter((sample) => {
+    const haystack = `${sample.title} ${sample.snippet} ${sample.url}`.toLowerCase();
+    if (host && haystack.includes(host)) return true;
+    return haystack.includes(name);
+  });
+}
+
 export async function runLayer1(env: Bindings, input: ExtractInput): Promise<ExtractResult> {
   const wiki = await fetchWikipedia(env, input.industry);
   const ddg = await fetchDuckDuckGo(input.industry);
   const location = input.location ? await fetchNominatim(input.location) : null;
-  const serp = await fetchFreeSerp(`${input.client_name} ${input.industry} ${input.location ?? ''}`.trim());
+  const searchResults = await fetchFreeSerp(
+    `${input.client_name} ${input.industry} ${input.location ?? ''}`.trim()
+  );
+  const serp = relevantSamples(searchResults, input.client_name, input.client_website);
 
   let meta = { title: '', description: '', image: null as string | null, h2: [] as string[] };
   if (input.client_website) meta = await fetchClientMetadata(input.client_website);
@@ -224,23 +258,36 @@ export async function runLayer1(env: Bindings, input: ExtractInput): Promise<Ext
     (await fetchOpenverseImage(`${input.industry} ${input.service}`)) ??
     (meta.image ? { url: meta.image, license: null, creator: null, source: 'client website' } : null);
 
+  // Key points describe this client. An encyclopedia definition of the
+  // industry is not a client fact, so it is kept only as background.
   const keyPoints: string[] = [...meta.h2];
-  if (keyPoints.length === 0 && wiki.summary) {
-    keyPoints.push(
-      ...wiki.summary
-        .split('. ')
-        .slice(0, 3)
-        .map((sentence) => sentence.trim())
-        .filter(Boolean)
-    );
-  }
 
-  const valueProp = meta.description || ddg || wiki.summary.split('. ')[0] || '';
-  const notes: { title: string; body: string; source?: string }[] = [];
-  if (meta.description) notes.push({ title: `${meta.title || input.client_name} positioning`, body: meta.description, source: input.client_website });
-  if (wiki.summary) notes.push({ title: `About ${input.industry}`, body: wiki.summary, source: 'Wikipedia' });
-  if (ddg) notes.push({ title: 'Definition', body: ddg, source: 'DuckDuckGo' });
-  for (const sample of serp) notes.push({ title: sample.title, body: sample.snippet, source: sample.url });
+  const clientHost = hostOf(input.client_website);
+  const clientSamples = serp.filter((sample) => clientHost && hostOf(sample.url) === clientHost);
+  const valueProp = meta.description || clientSamples[0]?.snippet || '';
+  const notes: { title: string; body: string; source?: string; kind?: 'client' | 'web' | 'background' }[] = [];
+  if (meta.description) {
+    notes.push({
+      title: `${meta.title || input.client_name} positioning`,
+      body: meta.description,
+      source: input.client_website,
+      kind: 'client',
+    });
+  }
+  for (const sample of clientSamples) {
+    notes.push({ title: sample.title, body: sample.snippet, source: sample.url, kind: 'client' });
+  }
+  // Other sites that mention the client are context, not the client's story.
+  for (const sample of serp.filter((item) => !clientSamples.includes(item))) {
+    notes.push({ title: sample.title, body: sample.snippet, source: sample.url, kind: 'web' });
+  }
+  // Background only: the organizer never uses these as the client's story.
+  if (wiki.summary) {
+    notes.push({ title: `About ${input.industry}`, body: wiki.summary, source: 'Wikipedia', kind: 'background' });
+  }
+  if (ddg) {
+    notes.push({ title: 'Definition', body: ddg, source: 'DuckDuckGo', kind: 'background' });
+  }
 
   return {
     business_name: meta.title || input.client_name,

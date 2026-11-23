@@ -11,7 +11,8 @@ import { jsonError } from '../utils/api-errors';
 import { getTrackingSummary } from '../services/tracking';
 import { buildDocumentPdf } from '../services/pdf';
 import { pdfResponse } from '../services/pdf-binary';
-import { ACTIVE_DOCUMENT_LIMIT, ARCHIVE_COUNT_LIMIT, ARCHIVE_RETENTION_DAYS, DRAFT_RETENTION_DAYS, PASSWORD_PROTECTED_LIMIT } from '../config/constants';
+import { ARCHIVE_COUNT_LIMIT, ARCHIVE_RETENTION_DAYS, DRAFT_RETENTION_DAYS, PASSWORD_PROTECTED_LIMIT } from '../config/constants';
+import { activeDocumentLimitBody, checkActiveDocumentLimit } from '../services/plan-limits';
 import type { Bindings } from '../types';
 
 const proposals = new Hono<{ Bindings: Bindings }>();
@@ -52,15 +53,10 @@ proposals.post('/draft', async (c) => {
   if (!b.title) return jsonError(c, 400, 'invalid_payload', 'A proposal title is required.');
 
   const plan = await getPlan(c.env, auth.userId);
-  const publishedCount = await dbFirst<{ c: number }>(
-    c.env,
-    `SELECT COUNT(*) as c FROM proposals WHERE user_id = ? AND status = 'published'`,
-    [auth.userId]
-  );
-  const limit = ACTIVE_DOCUMENT_LIMIT[plan as keyof typeof ACTIVE_DOCUMENT_LIMIT] ?? 5;
-  if (Number(publishedCount?.c ?? 0) >= limit) {
-    return jsonError(c, 403, 'plan_limit_reached', `Your plan allows ${limit} active documents.`);
-  }
+  // One active-document allowance covers proposals, contracts, forms and
+  // invoices; a draft may be created, but publishing is what consumes a slot.
+  const active = await checkActiveDocumentLimit(c.env, auth.userId);
+  if (!active.allowed) return c.json(activeDocumentLimitBody(active), 403);
 
   let clientId: string | null = b.client_id ?? null;
   if (clientId) {
@@ -113,6 +109,11 @@ proposals.post('/draft', async (c) => {
   const now = new Date().toISOString();
   const content = {
     problem: b.problem ?? '',
+    // The brief's own words. Without these the reloaded brief fell back to
+    // "freelance services" and every draft read as generic copy.
+    industry: b.industry ?? null,
+    service: b.service ?? null,
+    client_website: b.client_website ?? null,
     sections: b.sections ?? [],
     packages: b.packages ?? [],
     currency: b.currency ?? 'USD',
@@ -225,7 +226,12 @@ proposals.patch('/:id', async (c) => {
   ]);
   if (!row) return jsonError(c, 404, 'not_found', 'Proposal not found.');
   const now = new Date().toISOString();
-  const content = body.content ? mergeContent(row.content, body.content) : null;
+  let content = body.content ? mergeContent(row.content, body.content) : null;
+  // The template picker sends `template_id`; the column does not exist, so the
+  // choice is stored in the brief where the pattern learner reads it.
+  if (!content && typeof body.template_id === 'string' && body.template_id) {
+    content = mergeContent(row.content, { template_id: body.template_id });
+  }
   await dbRun(
     c.env,
     `UPDATE proposals SET title = COALESCE(?, title), content = COALESCE(?, content), updated_at = ? WHERE id = ? AND user_id = ?`,
@@ -258,6 +264,9 @@ proposals.post('/:id/publish', async (c) => {
   ]);
   if (!row) return jsonError(c, 404, 'not_found', 'Proposal not found.');
   if (row.status === 'archived') return jsonError(c, 409, 'archived', 'Unarchive the proposal before publishing.');
+
+  const active = await checkActiveDocumentLimit(c.env, auth.userId, row.status === 'published');
+  if (!active.allowed) return c.json(activeDocumentLimitBody(active), 403);
 
   const publicId = row.public_id ?? generatePublicId();
   const now = new Date().toISOString();

@@ -589,9 +589,15 @@ pub.get('/contracts/:id/signed-pdf', async (c) => {
   if (!verification.ok) {
     return jsonError(c, 403, 'invalid_token', `This download link is ${verification.reason === 'expired' ? 'expired' : 'not valid'}.`);
   }
-  const contract = await dbFirst<any>(c.env, `SELECT id, title, status FROM contracts WHERE id = ? LIMIT 1`, [contractId]);
+  const contract = await dbFirst<any>(
+    c.env,
+    `SELECT id, title, status, signing_status FROM contracts WHERE id = ? LIMIT 1`,
+    [contractId]
+  );
   if (!contract) return jsonError(c, 410, 'gone', 'This contract no longer exists.');
-  if (contract.status !== 'fully_signed') return jsonError(c, 409, 'not_signed', 'The contract is not fully signed.');
+  if ((contract.signing_status ?? contract.status) !== 'fully_signed') {
+    return jsonError(c, 409, 'not_signed', 'The contract is not fully signed.');
+  }
 
   const pdf = await ensureSignedPdf(c.env, contractId);
   if (!pdf) {

@@ -2,12 +2,16 @@
 //
 // The helper (the in-browser model) is optional; this is the deterministic
 // fallback the API can always answer with. It never invents a fact: every
-// sentence it writes comes from the notes or the facts the extract returned.
+// sentence it writes comes from the notes, the facts the extract returned, or
+// the freelancer's own brief. A generic encyclopedia definition is not used as
+// the client's value proposition, because that is what made drafts read as
+// filler.
 
 export interface OrganizerNote {
   title?: string;
   body?: string;
   source?: string;
+  kind?: 'client' | 'web' | 'background';
 }
 
 export interface OrganizerFacts {
@@ -15,6 +19,13 @@ export interface OrganizerFacts {
   value_prop?: string;
   key_points?: string[];
   location?: string;
+}
+
+export interface OrganizerPackage {
+  name?: string;
+  price?: number;
+  deliverables?: string;
+  description?: string;
 }
 
 export interface OrganizerInput {
@@ -25,6 +36,14 @@ export interface OrganizerInput {
   sections: string[];
   notes: OrganizerNote[];
   facts?: OrganizerFacts;
+  /** The brief's own content, which is first-hand and therefore preferred. */
+  problem?: string;
+  target_audience?: string;
+  timeline?: string;
+  cta?: string;
+  packages?: OrganizerPackage[];
+  /** The contract's own scope clause. It is first-hand wording, not research. */
+  scope?: string;
 }
 
 const ALIASES: Record<string, string> = {
@@ -38,6 +57,7 @@ const ALIASES: Record<string, string> = {
   what_s_included: 'what_is_included',
   how_it_works: 'process',
   approach: 'process',
+  schedule: 'timeline',
 };
 
 const STOPWORDS = new Set([
@@ -46,6 +66,9 @@ const STOPWORDS = new Set([
   'over', 'their', 'they', 'them', 'its', 'not', 'but', 'all', 'any', 'more',
   'when', 'what', 'who', 'how', 'why', 'new', 'use', 'using', 'get', 'one',
 ]);
+
+/** Background notes, not facts about this client. */
+const BACKGROUND_SOURCES = new Set(['wikipedia', 'duckduckgo']);
 
 export function normaliseSection(value: string): string {
   const flat = value.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
@@ -88,6 +111,46 @@ function list(values: string[]): string {
   return capitalise(`${cleanValues.slice(0, -1).join(', ')} and ${cleanValues[cleanValues.length - 1]}`);
 }
 
+function isBackground(note: OrganizerNote): boolean {
+  return BACKGROUND_SOURCES.has(String(note.source ?? '').trim().toLowerCase());
+}
+
+/**
+ * A search snippet cut with ellipses is not usable prose: quoting it produces
+ * fragments like "… fully remote team … here at Buffer." on the page.
+ */
+function usableBody(value: string): boolean {
+  const body = clean(value);
+  if (!body) return false;
+  if (body.includes('…') || /\s\.\.\.\s/.test(body)) return false;
+  if (!/[.!?]/.test(body)) return false;
+  return body.split(/\s+/).length >= 8;
+}
+
+/** Notes that describe this client, not the industry or another company. */
+function clientNotes(notes: OrganizerNote[]): OrganizerNote[] {
+  return notes.filter((note) => {
+    if (!usableBody(note.body ?? '')) return false;
+    if (note.kind) return note.kind === 'client';
+    return !isBackground(note);
+  });
+}
+
+/** Drops sentences that are already on the page, including near duplicates. */
+function uniqueSentences(value: string): string {
+  const seen = new Set<string>();
+  const parts = clean(value).match(/[^.!?]+[.!?]+/g) ?? [clean(value)];
+  const kept: string[] = [];
+  for (const part of parts) {
+    const sentence = part.trim();
+    const key = sentence.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    kept.push(sentence);
+  }
+  return kept.join(' ');
+}
+
 function scoreNote(note: OrganizerNote, section: string): number {
   const key = normaliseSection(section);
   const haystack = `${note.title ?? ''} ${note.body ?? ''}`.toLowerCase();
@@ -104,7 +167,7 @@ function pickNote(notes: OrganizerNote[], section: string): OrganizerNote | null
   let best: OrganizerNote | null = null;
   let bestScore = 0;
   for (const note of notes) {
-    if (!clean(note.body ?? '')) continue;
+    if (!usableBody(note.body ?? '')) continue;
     const score = scoreNote(note, section);
     if (score > bestScore) {
       best = note;
@@ -114,6 +177,20 @@ function pickNote(notes: OrganizerNote[], section: string): OrganizerNote | null
   return best;
 }
 
+function deliverableLines(packages: OrganizerPackage[]): string[] {
+  const lines: string[] = [];
+  for (const item of packages) {
+    // Split before cleaning: clean() collapses newlines into spaces.
+    const text = String(item.deliverables ?? item.description ?? '');
+    if (!text.trim()) continue;
+    for (const line of text.split(/\r?\n|;|•/)) {
+      const value = clean(line);
+      if (value) lines.push(value);
+    }
+  }
+  return Array.from(new Set(lines)).slice(0, 6);
+}
+
 /**
  * The organised copy for each requested section. Sections that need a real
  * business decision (price, dates, signature) are deliberately left to the
@@ -121,44 +198,84 @@ function pickNote(notes: OrganizerNote[], section: string): OrganizerNote | null
  */
 export function organizeSections(input: OrganizerInput): Record<string, string> {
   const notes = (input.notes ?? []).filter((note) => clean(note.body ?? ''));
+  const specific = clientNotes(notes);
   const facts = input.facts ?? {};
   const client = clean(input.client_name ?? '') || 'The client';
   const industry = clean(input.industry ?? '') || 'their industry';
   const service = clean(input.service ?? '');
+  const problem = clean(input.problem ?? '');
+  const audience = clean(input.target_audience ?? '');
+  const timeline = clean(input.timeline ?? '');
+  const cta = clean(input.cta ?? '');
+  const scopeClause = clean(input.scope ?? '');
+  const valueProp = clean(facts.value_prop ?? '');
+  const keyPoints = (facts.key_points ?? []).map(clean).filter(Boolean).slice(0, 6);
+  const deliverables = deliverableLines(input.packages ?? []);
+  // The positioning note is the client's own description, quoted once in the
+  // About section with attribution. Using it again as body copy repeats their
+  // marketing line in the freelancer's voice.
+  const valuePropKey = clean(valueProp).toLowerCase().slice(0, 40);
+  const narrativeNotes = valuePropKey
+    ? specific.filter((note) => !clean(note.body ?? '').toLowerCase().startsWith(valuePropKey))
+    : specific;
   const sections = Array.isArray(input.sections) ? input.sections : [];
   const output: Record<string, string> = {};
 
   for (const section of sections) {
     const key = normaliseSection(section);
-    const note = pickNote(notes, section);
+    const note = pickNote(narrativeNotes, section);
     const noteCopy = note ? sentences(note.body ?? '', 2) : '';
     let copy = '';
 
     if (key === 'introduction') {
-      const lead = `${client} works in ${industry}${service ? ` and offers ${service}` : ''}.`;
-      const value = clean(facts.value_prop ?? '');
-      copy = [lead, value ? sentences(value, 1) : '', noteCopy].filter(Boolean).join(' ');
-    } else if (key === 'about') {
-      const lead = `${client}${facts.location ? ` is based in ${clean(facts.location)}` : ''}.`;
-      const points = (facts.key_points ?? []).map(clean).filter(Boolean).slice(0, 1);
-      copy = [lead, facts.value_prop ? sentences(facts.value_prop, 1) : '', points.join(' '), noteCopy]
-        .filter(Boolean)
-        .join(' ');
-    } else if (key === 'scope') {
+      const lead = `${client}${industry ? ` works in ${industry}` : ''}${service ? ` and is looking for ${service}` : ''}.`;
       copy = [
-        `The engagement covers ${service || industry} for ${client}.`,
+        lead,
+        problem ? sentences(problem, 1) : '',
+        audience ? `The work is aimed at ${audience.replace(/[.]+$/, '')}.` : '',
         noteCopy,
-        'Each stage is reviewed with the client before the next one begins.',
       ]
         .filter(Boolean)
         .join(' ');
+    } else if (key === 'about') {
+      const lead = `${client}${facts.location ? ` is based in ${clean(facts.location)}` : ''}.`;
+      copy = [
+        lead,
+        // Quote the client's own description instead of speaking for them.
+        valueProp ? `Its own site describes it as: ${sentences(valueProp, 1)}` : '',
+        keyPoints.length ? `The pages emphasise ${list(keyPoints.slice(0, 3))}.` : '',
+        noteCopy,
+      ]
+        .filter(Boolean)
+        .join(' ');
+    } else if (key === 'scope') {
+      if (scopeClause) {
+        // Never rewrite a contract's scope clause into a generic sentence.
+        copy = [
+          sentences(scopeClause, 3),
+          deliverables.length ? `It includes ${list(deliverables.slice(0, 4))}.` : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+      } else {
+        copy = [
+          `The engagement covers ${service || industry} for ${client}.`,
+          problem ? sentences(problem, 1) : '',
+          deliverables.length ? `It includes ${list(deliverables.slice(0, 4))}.` : '',
+          noteCopy,
+          'Each stage is reviewed with the client before the next one begins.',
+        ]
+          .filter(Boolean)
+          .join(' ');
+      }
     } else if (key === 'what_is_included') {
-      const points = (facts.key_points ?? []).map(clean).filter(Boolean).slice(0, 5);
-      copy = points.length
-        ? `The work includes ${list(points)}.`
-        : noteCopy
-          ? `The work includes the following, drawn from the research: ${noteCopy}`
-          : '';
+      if (deliverables.length) {
+        copy = `The work includes ${list(deliverables)}. Each item is reviewed with the client before it is handed over.`;
+      } else if (keyPoints.length) {
+        copy = `The work includes ${list(keyPoints)}.`;
+      } else if (noteCopy) {
+        copy = `The work includes the following, drawn from the research: ${noteCopy}`;
+      }
     } else if (key === 'process') {
       const order = sections
         .map((item) => clean(item).toLowerCase())
@@ -166,12 +283,24 @@ export function organizeSections(input: OrganizerInput): Record<string, string> 
       copy = order.length
         ? `The work moves through ${list(order.slice(0, 6))}, with a review at each step before the next one starts.`
         : noteCopy;
+    } else if (key === 'timeline') {
+      if (timeline) {
+        copy = `The work runs over ${timeline.replace(/[.]+$/, '')}. You see the dates and checkpoints before the first payment, and any change is agreed in writing.`;
+      } else {
+        copy = noteCopy;
+      }
+    } else if (key === 'next_step') {
+      copy = cta ? sentences(cta, 1) : '';
+    } else if (key === 'pricing') {
+      // The document's own packages carry the price; never invent one.
+      copy = '';
     } else {
-      // Unknown section: use the best matching research, never a placeholder.
+      // Unknown section: use the best matching client research, never a placeholder.
       copy = noteCopy;
     }
 
-    if (copy.trim().length > 20) output[key] = copy.trim();
+    const finalCopy = uniqueSentences(copy).trim();
+    if (finalCopy.length > 20) output[key] = finalCopy;
   }
 
   return output;

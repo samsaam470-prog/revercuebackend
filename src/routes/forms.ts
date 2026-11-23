@@ -7,6 +7,13 @@ import { parsePagination, paginated, statusFilter } from '../utils/pagination';
 import { jsonError } from '../utils/api-errors';
 import { resolveClientId } from '../services/clients';
 import { archiveDocument, unarchiveDocument } from '../services/archive';
+import {
+  activeDocumentLimitBody,
+  branchingIsSet,
+  checkActiveDocumentLimit,
+  checkAdaptiveFormLimit,
+} from '../services/plan-limits';
+import { ADAPTIVE_FORM_LIMIT } from '../config/constants';
 import { getTrackingSummary } from '../services/tracking';
 import {
   getSubmission,
@@ -101,6 +108,20 @@ forms.post('/draft', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   if (!body.title) return jsonError(c, 400, 'invalid_payload', 'A form title is required.');
 
+  if (branchingIsSet(body.branching)) {
+    const adaptive = await checkAdaptiveFormLimit(c.env, auth.userId);
+    if (!adaptive.allowed) {
+      return c.json(
+        {
+          error: 'plan_limit_reached',
+          message: `Your plan allows ${adaptive.limit} adaptive forms.`,
+          details: { limit: adaptive.limit, used: adaptive.used },
+        },
+        403
+      );
+    }
+  }
+
   const clientId = await resolveClientId(c.env, auth.userId, {
     client_id: body.client_id,
     client_name: body.client_name,
@@ -149,8 +170,19 @@ forms.get('/:id', async (c) => {
     dbFirst<{ c: number }>(c.env, `SELECT COUNT(*) as c FROM form_submissions WHERE form_id = ?`, [row.id]),
   ]);
 
+  // `questions` and `branching` are stored as JSON text; the editor expects
+  // real arrays/objects, and passing the raw strings crashed the edit page.
+  const questions = parseJson(row.questions);
+  const branching = parseJson(row.branching);
   return c.json({
-    form: { ...row, ...settings, tracking, submission_count: Number(submissionCount?.c ?? 0) },
+    form: {
+      ...row,
+      questions: Array.isArray(questions) ? questions : [],
+      branching: branching && typeof branching === 'object' && !Array.isArray(branching) ? branching : {},
+      ...settings,
+      tracking,
+      submission_count: Number(submissionCount?.c ?? 0),
+    },
   });
 });
 
@@ -163,6 +195,20 @@ forms.patch('/:id', async (c) => {
   ]);
   if (!row) return jsonError(c, 404, 'not_found', 'Form not found.');
   if (row.status === 'archived') return jsonError(c, 409, 'archived', 'Unarchive the form before editing it.');
+
+  if (body.branching !== undefined && branchingIsSet(body.branching) && !branchingIsSet(row.branching)) {
+    const adaptive = await checkAdaptiveFormLimit(c.env, auth.userId, false, row.id);
+    if (!adaptive.allowed) {
+      return c.json(
+        {
+          error: 'plan_limit_reached',
+          message: `Your plan allows ${adaptive.limit} adaptive forms.`,
+          details: { limit: adaptive.limit, used: adaptive.used },
+        },
+        403
+      );
+    }
+  }
 
   const now = new Date().toISOString();
   await dbRun(
@@ -194,6 +240,9 @@ forms.post('/:id/publish', async (c) => {
   ]);
   if (!row) return jsonError(c, 404, 'not_found', 'Form not found.');
   if (row.status === 'archived') return jsonError(c, 409, 'archived', 'Unarchive the form before publishing.');
+
+  const active = await checkActiveDocumentLimit(c.env, auth.userId, row.status === 'published');
+  if (!active.allowed) return c.json(activeDocumentLimitBody(active), 403);
 
   const questions = parseJson(row.questions);
   if (!Array.isArray(questions) || questions.length === 0) {

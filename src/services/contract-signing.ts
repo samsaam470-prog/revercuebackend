@@ -194,7 +194,7 @@ export function buildSnapshot(
   contentHashMatches: boolean
 ): SigningSnapshot {
   return {
-    status: String(contract.status ?? 'draft'),
+    status: String(contract.signing_status ?? contract.status ?? 'draft'),
     versionId: version?.id ?? null,
     versionLocked: Boolean(version?.locked_at),
     versionStatus: version?.status ?? null,
@@ -202,8 +202,8 @@ export function buildSnapshot(
     hasFreelancerSignature: signatures.some((s) => s.signer_role === 'freelancer'),
     hasClientSignature: signatures.some((s) => s.signer_role === 'client'),
     contentHashMatches,
-    declined: String(contract.status) === CONTRACT_STATUS.DECLINED,
-    voided: String(contract.status) === CONTRACT_STATUS.VOIDED,
+    declined: String(contract.signing_status ?? contract.status) === CONTRACT_STATUS.DECLINED,
+    voided: String(contract.signing_status ?? contract.status) === CONTRACT_STATUS.VOIDED,
   };
 }
 
@@ -315,6 +315,24 @@ export async function validateAndStoreSignature(
     signatureDataUrl: string;
   }
 ): Promise<{ key: string; hash: string; mime: string; bytes: Uint8Array }> {
+  // A signature is either a drawn image (data URL) or a typed full name, which
+  // is what the builder and the public signing page collect. Typed signatures
+  // are hashed as text and need no stored image; the signed PDF falls back to
+  // printing the signer's name and the signature hash.
+  const typed = String(input.signatureDataUrl ?? '').trim();
+  if (typed && !typed.startsWith('data:')) {
+    if (typed.length < 2 || typed.length > 200) {
+      throw new SigningError('invalid_signature', 'Type your full name to sign.', 400);
+    }
+    const hash = await sha256Hex(`typed:${typed}`);
+    return {
+      key: `typed/${input.contractId}/${input.versionId}/${input.role}-${hash.slice(0, 16)}`,
+      hash,
+      mime: 'text/plain',
+      bytes: new Uint8Array(),
+    };
+  }
+
   const decoded = decodeDataUrl(input.signatureDataUrl);
   if (!decoded) {
     throw new SigningError('invalid_signature', 'The signature image is not a valid image data URL.', 400);
@@ -487,12 +505,13 @@ export async function publishSignedContract(
 
   assertCanPublish(snapshot);
 
+  const afterPublish = statusAfterPublish();
   const publicId = contract.public_id ?? generatePublicId();
   const now = new Date().toISOString();
   await dbRun(
     env,
-    `UPDATE contracts SET status = ?, public_id = COALESCE(public_id, ?), published_at = COALESCE(published_at, ?), updated_at = ? WHERE id = ? AND user_id = ?`,
-    [statusAfterPublish(), publicId, now, now, contract.id, userId]
+    `UPDATE contracts SET status = ?, signing_status = ?, public_id = COALESCE(public_id, ?), published_at = COALESCE(published_at, ?), updated_at = ? WHERE id = ? AND user_id = ?`,
+    [afterPublish.status, afterPublish.signingStatus, publicId, now, now, contract.id, userId]
   );
   await dbRun(env, `UPDATE contract_versions SET status = 'awaiting_client' WHERE id = ? AND status = 'draft'`, [
     version.id,
@@ -597,12 +616,12 @@ export async function signAsClient(
   }
 
   const signedAt = inserted.signedAt;
-  await dbRun(env, `UPDATE contracts SET status = ?, signed_at = ?, updated_at = ? WHERE id = ?`, [
-    statusAfterClientSignature(),
-    signedAt,
-    signedAt,
-    contract.id,
-  ]);
+  const afterSign = statusAfterClientSignature();
+  await dbRun(
+    env,
+    `UPDATE contracts SET status = ?, signing_status = ?, signed_at = ?, updated_at = ? WHERE id = ?`,
+    [afterSign.status, afterSign.signingStatus, signedAt, signedAt, contract.id]
+  );
   await dbRun(env, `UPDATE contract_versions SET status = 'signed', locked_at = COALESCE(locked_at, ?) WHERE id = ?`, [
     signedAt,
     version.id,
@@ -779,13 +798,13 @@ export async function getSignedPdfForOwner(
   contractId: string,
   userId: string
 ): Promise<{ bytes: Uint8Array; filename: string } | null> {
-  const contract = await dbFirst<{ id: string; title: string; status: string }>(
+  const contract = await dbFirst<{ id: string; title: string; status: string; signing_status: string | null }>(
     env,
-    `SELECT id, title, status FROM contracts WHERE id = ? AND user_id = ? LIMIT 1`,
+    `SELECT id, title, status, signing_status FROM contracts WHERE id = ? AND user_id = ? LIMIT 1`,
     [contractId, userId]
   );
   if (!contract) return null;
-  if (contract.status !== CONTRACT_STATUS.FULLY_SIGNED) {
+  if (String(contract.signing_status ?? contract.status) !== CONTRACT_STATUS.FULLY_SIGNED) {
     throw new SigningError('freelancer_signature_required', 'This contract is not fully signed yet.', 409);
   }
   const pdf = await ensureSignedPdf(env, contractId);
@@ -833,7 +852,7 @@ export async function createNewVersion(
   );
   await dbRun(
     env,
-    `UPDATE contracts SET status = 'draft', published_at = NULL, signed_at = NULL, updated_at = ? WHERE id = ? AND user_id = ?`,
+    `UPDATE contracts SET status = 'draft', signing_status = 'draft', published_at = NULL, signed_at = NULL, updated_at = ? WHERE id = ? AND user_id = ?`,
     [now, contract.id, userId]
   );
 

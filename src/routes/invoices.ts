@@ -8,12 +8,23 @@ import { parsePagination, paginated, statusFilter } from '../utils/pagination';
 import { jsonError } from '../utils/api-errors';
 import { archiveDocument, unarchiveDocument } from '../services/archive';
 import { getTrackingSummary } from '../services/tracking';
+import { activeDocumentLimitBody, checkActiveDocumentLimit } from '../services/plan-limits';
 import { resolveClientId } from '../services/clients';
 import { buildDocumentPdf } from '../services/pdf';
 import { pdfResponse } from '../services/pdf-binary';
 import type { Bindings } from '../types';
 
 const invoices = new Hono<{ Bindings: Bindings }>();
+
+function parseJson(value: unknown): any {
+  if (!value) return null;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(String(value));
+  } catch {
+    return null;
+  }
+}
 invoices.use('*', userAuthMiddleware);
 
 const LIST_STATUSES = [
@@ -131,7 +142,15 @@ invoices.get('/:id', async (c) => {
   } catch {
     extra = {};
   }
-  return c.json({ invoice: { ...row, ...extra, tracking } });
+  const lineItems = parseJson(row.line_items);
+  return c.json({
+    invoice: {
+      ...row,
+      line_items: Array.isArray(lineItems) ? lineItems : [],
+      ...extra,
+      tracking,
+    },
+  });
 });
 
 invoices.patch('/:id', async (c) => {
@@ -178,6 +197,9 @@ invoices.post('/:id/publish', async (c) => {
   ]);
   if (!row) return jsonError(c, 404, 'not_found', 'Invoice not found.');
   if (row.status === 'archived') return jsonError(c, 409, 'archived', 'Unarchive the invoice before publishing.');
+
+  const active = await checkActiveDocumentLimit(c.env, auth.userId, row.status === 'published');
+  if (!active.allowed) return c.json(activeDocumentLimitBody(active), 403);
 
   const publicId = row.public_id ?? generatePublicId();
   const now = new Date().toISOString();

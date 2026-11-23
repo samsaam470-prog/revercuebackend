@@ -20,27 +20,41 @@ organize.post('/', async (c) => {
       ? body.notes
       : [];
   const facts = research.facts ?? body.facts ?? {};
+  const brief = body.brief ?? {};
+  const packages = Array.isArray(brief.packages)
+    ? brief.packages
+    : Array.isArray(body.packages)
+      ? body.packages
+      : [];
   const requested: string[] = Array.isArray(body.sections)
     ? body.sections.map((section: unknown) => String(section))
     : [];
 
   try {
-    const fixed = await fixWithPatterns(
-      c.env,
-      {
-        user_id: uid,
-        client_id: body.client_id ?? null,
-        industry,
-        service,
-        tone: String(body.tone ?? 'formal'),
-        sections: requested,
-      },
-      {
-        ...research,
-        notes,
-        sections: requested.map((section) => ({ id: normaliseSection(section) })),
-      }
-    );
+    // Patterns are optional context. If the learner fails, the section copy
+    // below is still returned instead of failing the whole draft.
+    let fixed: any = {};
+    try {
+      fixed = await fixWithPatterns(
+        c.env,
+        {
+          user_id: uid,
+          client_id: body.client_id ?? null,
+          industry,
+          service,
+          tone: String(body.tone ?? 'formal'),
+          sections: requested,
+        },
+        {
+          ...research,
+          notes,
+          sections: requested.map((section) => ({ id: normaliseSection(section) })),
+        }
+      );
+    } catch (error) {
+      console.error('ORGANIZE_PATTERNS_FAILED', (error as Error)?.message ?? error);
+      fixed = { tone: String(body.tone ?? 'formal') };
+    }
 
     const sections = organizeSections({
       client_name: body.client_name ? String(body.client_name) : undefined,
@@ -50,6 +64,12 @@ organize.post('/', async (c) => {
       sections: requested,
       notes,
       facts,
+      problem: brief.problem ?? body.problem,
+      target_audience: brief.target_audience ?? body.target_audience,
+      timeline: brief.timeline ?? body.timeline,
+      cta: brief.cta ?? body.cta,
+      scope: brief.scope ?? body.scope,
+      packages,
     });
 
     // Keep the organised copy on the result as well, so a caller that only
@@ -59,7 +79,7 @@ organize.post('/', async (c) => {
       result: { ...fixed, organized_sections: sections },
       sections,
       notes_used: notes.length,
-      tone: String(body.tone ?? fixed.tone ?? 'formal'),
+      tone: String(body.tone ?? fixed?.tone ?? 'formal'),
     });
   } catch (err: any) {
     return c.json({ error: 'organize_failed', message: err.message ?? 'Unknown' }, 500);
