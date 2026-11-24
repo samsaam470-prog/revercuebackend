@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { tursoQuery, tursoExecute } from '../utils/turso';
+import { dbFirst, dbQuery, dbRun } from '../utils/db';
 import { userAuthMiddleware, getAuth } from '../middleware/user-auth';
 import { parsePagination, paginated } from '../utils/pagination';
 import { listNotificationsSince } from '../services/notifications';
@@ -11,11 +12,11 @@ notifications.use('*', userAuthMiddleware);
 
 notifications.get('/unread-count', async (c) => {
   const auth = getAuth(c);
-  const rows = await tursoQuery(
-    c.env,
-    `SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND read = 0 AND dismissed = 0`,
-    [auth.userId]
-  );
+  if (c.env.ENVIRONMENT === 'staging') {
+    const row = await dbFirst<{ c: number }>(c.env, 'SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND read = 0 AND dismissed = 0', [auth.userId]);
+    return c.json({ count: Number(row?.c ?? 0) });
+  }
+  const rows = await tursoQuery(c.env, `SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND read = 0 AND dismissed = 0`, [auth.userId]);
   return c.json({ count: Number(rows.rows[0]?.c ?? 0) });
 });
 
@@ -149,23 +150,25 @@ notifications.get('/', async (c) => {
   if (filter === 'client') where += ` AND client_id IS NOT NULL`;
   if (filter === 'system') where += ` AND client_id IS NULL`;
 
+  if (c.env.ENVIRONMENT === 'staging') {
+    const totalRow = await dbFirst<{ c: number }>(c.env, `SELECT COUNT(*) as c FROM notifications WHERE ${where}`, args);
+    const rows = await dbQuery<any>(c.env, `SELECT * FROM notifications WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...args, pagination.limit, pagination.offset]);
+    const data = rows.map((row: any) => ({ ...row, read: Boolean(row.read), dismissed: Boolean(row.dismissed) }));
+    return c.json(paginated(data, Number(totalRow?.c ?? 0), pagination));
+  }
   const totalRow = await tursoQuery(c.env, `SELECT COUNT(*) as c FROM notifications WHERE ${where}`, args);
-  const rows = await tursoQuery(
-    c.env,
-    `SELECT * FROM notifications WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-    [...args, pagination.limit, pagination.offset]
-  );
-
+  const rows = await tursoQuery(c.env, `SELECT * FROM notifications WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...args, pagination.limit, pagination.offset]);
   const data = rows.rows.map((row: any) => ({ ...row, read: Boolean(row.read), dismissed: Boolean(row.dismissed) }));
   return c.json(paginated(data, Number(totalRow.rows[0]?.c ?? 0), pagination));
 });
 
 notifications.patch('/:id/read', async (c) => {
   const auth = getAuth(c);
-  await tursoExecute(c.env, `UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?`, [
-    c.req.param('id'),
-    auth.userId,
-  ]);
+  if (c.env.ENVIRONMENT === 'staging') {
+    await dbRun(c.env, 'UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?', [c.req.param('id'), auth.userId]);
+    return c.json({ success: true });
+  }
+  await tursoExecute(c.env, `UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?`, [c.req.param('id'), auth.userId]);
   await tursoExecute(
     c.env,
     `UPDATE admin_notification_deliveries SET read_at = ? WHERE notification_id = ? AND user_id = ? AND read_at IS NULL`,
@@ -176,16 +179,21 @@ notifications.patch('/:id/read', async (c) => {
 
 notifications.patch('/read-all', async (c) => {
   const auth = getAuth(c);
+  if (c.env.ENVIRONMENT === 'staging') {
+    await dbRun(c.env, 'UPDATE notifications SET read = 1 WHERE user_id = ?', [auth.userId]);
+    return c.json({ success: true });
+  }
   await tursoExecute(c.env, `UPDATE notifications SET read = 1 WHERE user_id = ?`, [auth.userId]);
   return c.json({ success: true });
 });
 
 notifications.delete('/:id', async (c) => {
   const auth = getAuth(c);
-  await tursoExecute(c.env, `UPDATE notifications SET dismissed = 1 WHERE id = ? AND user_id = ?`, [
-    c.req.param('id'),
-    auth.userId,
-  ]);
+  if (c.env.ENVIRONMENT === 'staging') {
+    await dbRun(c.env, 'UPDATE notifications SET dismissed = 1 WHERE id = ? AND user_id = ?', [c.req.param('id'), auth.userId]);
+    return c.json({ success: true });
+  }
+  await tursoExecute(c.env, `UPDATE notifications SET dismissed = 1 WHERE id = ? AND user_id = ?`, [c.req.param('id'), auth.userId]);
   return c.json({ success: true });
 });
 

@@ -20,6 +20,10 @@ proposals.use('*', userAuthMiddleware);
 const LIST_STATUSES = ['draft', 'published', 'accepted', 'declined', 'archived'] as const;
 
 async function getPlan(env: Bindings, uid: string): Promise<string> {
+  if (env.ENVIRONMENT === 'staging') {
+    const user = await dbFirst<{ plan: string }>(env, 'SELECT plan FROM staging_users WHERE id = ? LIMIT 1', [uid]);
+    return String(user?.plan ?? 'free');
+  }
   const u = await tursoQuery(env, `SELECT plan FROM users WHERE id = ? LIMIT 1`, [uid]);
   return String(u.rows[0]?.plan ?? 'free');
 }

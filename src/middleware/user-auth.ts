@@ -1,4 +1,5 @@
 import { jwtVerify } from 'jose';
+import { dbFirst } from '../utils/db';
 import type { Context, MiddlewareHandler } from 'hono';
 import { tursoQuery } from '../utils/turso';
 import type { AuthContext, Bindings } from '../types';
@@ -68,6 +69,25 @@ export async function authenticateRequest(
 ): Promise<{ auth: AuthContext } | { failure: AuthFailure }> {
   const env = c.env;
   const header = c.req.header('Authorization') ?? '';
+
+  // Isolated staging identities live only in the staging D1 database. This
+  // branch never falls through to AuthAction or the production Turso store.
+  if (env.ENVIRONMENT === 'staging') {
+    if (!header.startsWith('Bearer ') || !env.STAGING_JWT_KEY) {
+      return { failure: { status: 401, body: { error: 'unauthorized', message: 'Missing staging session.' } } };
+    }
+    try {
+      const { payload } = await jwtVerify(header.slice(7).trim(), new TextEncoder().encode(env.STAGING_JWT_KEY), { algorithms: ['HS256'] });
+      if (typeof payload.sub !== 'string') throw new Error('Invalid staging subject');
+      const user = await dbFirst<{ id: string; email: string; plan: string }>(
+        env, 'SELECT id, email, plan FROM staging_users WHERE id = ? LIMIT 1', [payload.sub]
+      );
+      if (!user) throw new Error('Staging user not found');
+      return { auth: { userId: user.id, email: user.email, plan: user.plan, role: 'user', via: 'legacy' } };
+    } catch {
+      return { failure: { status: 401, body: { error: 'unauthorized', message: 'Invalid or expired staging session.' } } };
+    }
+  }
   if (!header.startsWith('Bearer ')) {
     return { failure: { status: 401, body: { error: 'unauthorized', message: 'Missing bearer token.' } } };
   }

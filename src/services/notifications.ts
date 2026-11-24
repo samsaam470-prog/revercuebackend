@@ -1,4 +1,5 @@
 import { tursoExecute, tursoQuery } from '../utils/turso';
+import { dbFirst, dbQuery, dbRun } from '../utils/db';
 import { generateId } from '../utils/ids';
 import { maybeSendEmail } from './email-notify';
 import type { Bindings } from '../types';
@@ -23,19 +24,16 @@ export interface NotificationInput {
 export async function createNotification(env: Bindings, input: NotificationInput): Promise<string> {
   const id = generateId('notif');
   const now = new Date().toISOString();
+  if (env.ENVIRONMENT === 'staging') {
+    await dbRun(env, `INSERT INTO notifications (id, user_id, event_type, client_id, document_id, title, body, read, dismissed, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
+      [id, input.userId, input.eventType, input.clientId ?? null, input.documentId ?? null, input.title.slice(0, 300), input.body ?? null, now]);
+    return id;
+  }
   await tursoExecute(
     env,
     `INSERT INTO notifications (id, user_id, event_type, client_id, document_id, title, body, read, dismissed, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?)`,
-    [
-      id,
-      input.userId,
-      input.eventType,
-      input.clientId ?? null,
-      input.documentId ?? null,
-      input.title.slice(0, 300),
-      input.body ?? null,
-      now,
-    ]
+    [id, input.userId, input.eventType, input.clientId ?? null, input.documentId ?? null, input.title.slice(0, 300), input.body ?? null, now]
   );
 
   if (input.sendEmail !== false) {
@@ -52,11 +50,11 @@ export async function createNotification(env: Bindings, input: NotificationInput
 }
 
 export async function getUnreadCount(env: Bindings, userId: string): Promise<number> {
-  const result = await tursoQuery(
-    env,
-    `SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND read = 0 AND dismissed = 0`,
-    [userId]
-  );
+  if (env.ENVIRONMENT === 'staging') {
+    const row = await dbFirst<{ c: number }>(env, 'SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND read = 0 AND dismissed = 0', [userId]);
+    return Number(row?.c ?? 0);
+  }
+  const result = await tursoQuery(env, `SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND read = 0 AND dismissed = 0`, [userId]);
   return Number(result.rows[0]?.c ?? 0);
 }
 
@@ -84,6 +82,12 @@ export async function listNotificationsSince(
   limit = 25
 ): Promise<NotificationRow[]> {
   const safeLimit = Math.min(Math.max(limit, 1), 50);
+  if (env.ENVIRONMENT === 'staging') {
+    const rows = since
+      ? await dbQuery<NotificationRow>(env, `SELECT id, user_id, event_type, client_id, document_id, title, body, read, dismissed, created_at FROM notifications WHERE user_id = ? AND dismissed = 0 AND created_at > ? ORDER BY created_at ASC LIMIT ?`, [userId, since, safeLimit])
+      : await dbQuery<NotificationRow>(env, `SELECT id, user_id, event_type, client_id, document_id, title, body, read, dismissed, created_at FROM notifications WHERE user_id = ? AND dismissed = 0 ORDER BY created_at DESC LIMIT ?`, [userId, safeLimit]);
+    return since ? rows : rows.reverse();
+  }
   if (since) {
     const result = await tursoQuery(
       env,

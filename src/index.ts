@@ -23,6 +23,7 @@ import extractRouter from './routes/extract';
 import organizeRouter from './routes/organize';
 import summaryRouter from './routes/summary';
 import marketingRouter from './routes/marketing';
+import stagingAuthRouter from './routes/staging-auth';
 import { runHourly } from './cron/summary';
 import { runAuthActionSync } from './services/authaction-sync';
 import { runPublishCron } from './cron/publish';
@@ -80,6 +81,7 @@ app.get('/api/health', (c) =>
 );
 
 app.route('/api/auth', authRouter);
+app.route('/api/staging', stagingAuthRouter);
 app.route('/api/onboarding', onboardingRouter);
 app.route('/api/dashboard', dashboardRouter);
 app.route('/api/proposals', proposalsRouter);
@@ -107,6 +109,7 @@ app.onError(async (err, c) => {
   const status = (err as any)?.status;
   const reference = newReferenceCode();
   console.error('UNHANDLED_ERROR', reference, c.req.method, c.req.path, err);
+  if (c.env.ENVIRONMENT !== 'staging') {
   try {
     const { tursoExecute } = await import('./utils/turso');
     const { generateId } = await import('./utils/ids');
@@ -124,6 +127,7 @@ app.onError(async (err, c) => {
     );
   } catch (logError) {
     console.error('ERROR_LOG_WRITE_FAILED', logError);
+  }
   }
   // Never leak internal error messages (SQL, provider responses) to clients.
   return c.json(

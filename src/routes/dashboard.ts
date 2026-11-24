@@ -59,12 +59,11 @@ dashboard.post('/suggestions/:id/dismiss', async (c) => {
 dashboard.get('/activity', async (c) => {
   const auth = getAuth(c);
   const limit = Math.min(Math.max(Number(c.req.query('limit') ?? 10) || 10, 1), 50);
-  const rows = await tursoQuery(
-    c.env,
-    `SELECT id, event_type, client_id, document_id, title, created_at FROM notifications
-     WHERE user_id = ? AND dismissed = 0 ORDER BY created_at DESC LIMIT ?`,
-    [auth.userId, limit]
-  );
+  if (c.env.ENVIRONMENT === 'staging') {
+    const rows = await dbQuery(c.env, 'SELECT id, event_type, client_id, document_id, title, created_at FROM notifications WHERE user_id = ? AND dismissed = 0 ORDER BY created_at DESC LIMIT ?', [auth.userId, limit]);
+    return c.json({ activity: rows });
+  }
+  const rows = await tursoQuery(c.env, `SELECT id, event_type, client_id, document_id, title, created_at FROM notifications WHERE user_id = ? AND dismissed = 0 ORDER BY created_at DESC LIMIT ?`, [auth.userId, limit]);
   return c.json({ activity: rows.rows });
 });
 

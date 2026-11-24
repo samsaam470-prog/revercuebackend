@@ -106,6 +106,9 @@ export interface Bindings {
   MAX_UPLOAD_BYTES?: string;
   /** "production" enables stricter behaviour (legacy auth off by default). */
   ENVIRONMENT?: string;
+  STAGING_LOGIN_EMAIL?: string;
+  STAGING_LOGIN_PASSWORD?: string;
+  STAGING_JWT_KEY?: string;
 }
 
 /** Authenticated request context set by the shared auth middleware. */

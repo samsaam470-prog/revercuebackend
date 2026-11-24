@@ -89,3 +89,23 @@ WHOP_PLAN_GROWTH_STANDARD = "plan_ka3DbHhgt2eP9"
 WHOP_PLAN_SCALE = "plan_o7FrgrytZNCUz"
 WHOP_GROWTH_PROMO_START = "2026-11-23T00:00:00Z"
 WHOP_GROWTH_PROMO_END = "2026-12-23T00:00:00Z"
+
+
+# Completely separate staging Worker. It binds only to the isolated staging D1.
+[env.staging]
+name = "revercue-api-staging"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "revercue-staging-isolated"
+database_id = "2337e39b-8ae1-4f2e-9ac7-31b2642c4854"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+FRONTEND_ORIGIN = "https://staging-isolated-workflows.revercue.pages.dev"
+ALLOWED_ORIGINS = "https://staging-isolated-workflows.revercue.pages.dev"
+APP_URL = "https://staging-isolated-workflows.revercue.pages.dev"
+API_BASE_URL = "https://revercue-api-staging.samsaam470.workers.dev"
+
+[env.staging.triggers]
+crons = []
