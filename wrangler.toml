@@ -38,6 +38,12 @@ AUTHACTION_CLIENT_ID = "OXJC1YmE3BwYU03xKfrMblC2F8hr9AC4"
 # frontend has fully moved to AuthAction. Set to "false" to retire it.
 ALLOW_LEGACY_AUTH = "true"
 
+# Review environment (/testaccountforyou). A fixed account for automated agents.
+# It uses the legacy app token, so it requires ALLOW_LEGACY_AUTH = "true".
+# Set to "false" to remove the account endpoints completely.
+TEST_ACCOUNT_ENABLED = "true"
+TEST_ACCOUNT_EMAIL = "agent@revercue.test"
+
 # Retention policy (invoices and fully signed contracts are never auto-deleted
 # by default; see docs/DEPLOYMENT.md).
 RETENTION_WARNING_DAYS = "10"
@@ -75,6 +81,8 @@ AUTHACTION_ISSUER = "https://revercue.in.authaction.com"
 AUTHACTION_AUDIENCE = "revercue-api.samsaam470.workers.dev"
 AUTHACTION_CLIENT_ID = "OXJC1YmE3BwYU03xKfrMblC2F8hr9AC4"
 ALLOW_LEGACY_AUTH = "true"
+TEST_ACCOUNT_ENABLED = "true"
+TEST_ACCOUNT_EMAIL = "agent@revercue.test"
 RETENTION_WARNING_DAYS = "10"
 RETENTION_AUTO_DELETE_TYPES = "proposal,contract"
 EMAIL_MAX_ATTEMPTS = "5"
