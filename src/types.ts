@@ -106,14 +106,6 @@ export interface Bindings {
   MAX_UPLOAD_BYTES?: string;
   /** "production" enables stricter behaviour (legacy auth off by default). */
   ENVIRONMENT?: string;
-
-  // ---------------------------------------------------------------------------
-  // Review environment: a fixed account an automated agent can use without
-  // AuthAction. Set TEST_ACCOUNT_ENABLED=false to remove it entirely.
-  // ---------------------------------------------------------------------------
-  TEST_ACCOUNT_ENABLED?: string;
-  TEST_ACCOUNT_EMAIL?: string;
-  TEST_ACCOUNT_PASSWORD?: string;
 }
 
 /** Authenticated request context set by the shared auth middleware. */

@@ -1,5 +1,6 @@
 import { dbFirst, dbRun } from '../utils/db';
 import { safeFetchPublic } from '../utils/url-safety';
+import type { Bindings } from '../types';
 
 /**
  * Extract API (Layer 1) and Visual Assets API (Layer 4).

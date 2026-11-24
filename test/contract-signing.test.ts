@@ -102,7 +102,7 @@ describe('contract lifecycle rules', () => {
   it('writes the expected contract statuses', () => {
     expect(statusAfterFreelancerSignature(snapshot({ published: false }))).toBe('draft');
     expect(statusAfterFreelancerSignature(snapshot({ published: true }))).toBe('awaiting_client_signature');
-    expect(statusAfterClientSignature()).toBe('fully_signed');
+    expect(statusAfterClientSignature()).toEqual({ status: 'approved', signingStatus: 'fully_signed' });
   });
 
   it('requires explicit electronic-signature consent', () => {

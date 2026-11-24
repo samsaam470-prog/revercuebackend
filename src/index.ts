@@ -23,7 +23,6 @@ import extractRouter from './routes/extract';
 import organizeRouter from './routes/organize';
 import summaryRouter from './routes/summary';
 import marketingRouter from './routes/marketing';
-import testAccountRouter from './routes/test-account';
 import { runHourly } from './cron/summary';
 import { runAuthActionSync } from './services/authaction-sync';
 import { runPublishCron } from './cron/publish';
@@ -76,7 +75,6 @@ app.get('/api/health', (c) =>
       legacy_auth: (c.env.ALLOW_LEGACY_AUTH ?? 'true').toLowerCase() !== 'false',
       email_configured: Boolean((c.env.COOPER_API_KEY && c.env.COOPER_INBOX_ID) || (c.env.OPENMAIL_API_KEY && c.env.OPENMAIL_INBOX_ID)),
       signing_links: Boolean(c.env.SIGNING_LINK_SECRET),
-      test_account: String(c.env.TEST_ACCOUNT_ENABLED ?? 'true').toLowerCase() !== 'false',
     },
   })
 );
@@ -104,8 +102,6 @@ app.route('/api/organize', organizeRouter);
 app.route('/api/summary', summaryRouter);
 // Public marketing endpoints: /api/newsletter, /api/contact, /api/waitlist, /api/beta
 app.route('/api', marketingRouter);
-// Review-environment account (no AuthAction). Disable with TEST_ACCOUNT_ENABLED=false.
-app.route('/api/test-account', testAccountRouter);
 
 app.onError(async (err, c) => {
   const status = (err as any)?.status;
