@@ -89,3 +89,17 @@ WHOP_PLAN_GROWTH_STANDARD = "plan_ka3DbHhgt2eP9"
 WHOP_PLAN_SCALE = "plan_o7FrgrytZNCUz"
 WHOP_GROWTH_PROMO_START = "2026-11-23T00:00:00Z"
 WHOP_GROWTH_PROMO_END = "2026-12-23T00:00:00Z"
+
+
+# A dedicated test Worker environment. Wrangler environments do not inherit
+# production bindings; this environment intentionally has no D1, KV, R2, or
+# Turso configuration. Deploy with: wrangler deploy --env test
+[env.test]
+name = "revercue-api-test"
+
+[env.test.vars]
+ENVIRONMENT = "staging"
+TEST_HARNESS_ENABLED = "true"
+FRONTEND_ORIGIN = "https://test-isolated-plan-harness.revercue.pages.dev"
+ALLOWED_ORIGINS = "https://test-isolated-plan-harness.revercue.pages.dev"
+API_BASE_URL = "https://revercue-api-test.workers.dev"
