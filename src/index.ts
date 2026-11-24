@@ -110,25 +110,27 @@ app.onError(async (err, c) => {
   const status = (err as any)?.status;
   const reference = newReferenceCode();
   console.error('UNHANDLED_ERROR', reference, c.req.method, c.req.path, err);
-  try {
-    const { tursoExecute } = await import('./utils/turso');
-    const { generateId } = await import('./utils/ids');
-    await tursoExecute(
-      c.env,
-      `INSERT INTO error_logs (id, reference_code, route, message, stack, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        generateId('err'),
-        reference,
-        `${c.req.method} ${c.req.path}`,
-        String(err?.message ?? 'unknown').slice(0, 1000),
-        String(err?.stack ?? '').slice(0, 4000),
-        new Date().toISOString(),
-      ]
-    );
-  } catch (logError) {
-    console.error('ERROR_LOG_WRITE_FAILED', logError);
+  // The isolated test harness must never reach the production error-log store.
+  if (!c.req.path.startsWith('/api/test-harness')) {
+    try {
+      const { tursoExecute } = await import('./utils/turso');
+      const { generateId } = await import('./utils/ids');
+      await tursoExecute(
+        c.env,
+        `INSERT INTO error_logs (id, reference_code, route, message, stack, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          generateId('err'),
+          reference,
+          `${c.req.method} ${c.req.path}`,
+          String(err?.message ?? 'unknown').slice(0, 1000),
+          String(err?.stack ?? '').slice(0, 4000),
+          new Date().toISOString(),
+        ]
+      );
+    } catch (logError) {
+      console.error('ERROR_LOG_WRITE_FAILED', logError);
+    }
   }
-  // Never leak internal error messages (SQL, provider responses) to clients.
   return c.json(
     {
       error: 'internal_server_error',
