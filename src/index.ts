@@ -22,7 +22,7 @@ import adminActionsRouter from './routes/admin-actions';
 import extractRouter from './routes/extract';
 import organizeRouter from './routes/organize';
 import summaryRouter from './routes/summary';
-import marketingRouter from './routes/marketing';
+import marketingRouter from './routes/marketing';\nimport testHarnessRouter from './routes/test-harness';
 import { runHourly } from './cron/summary';
 import { runAuthActionSync } from './services/authaction-sync';
 import { runPublishCron } from './cron/publish';
@@ -101,7 +101,7 @@ app.route('/api/extract', extractRouter);
 app.route('/api/organize', organizeRouter);
 app.route('/api/summary', summaryRouter);
 // Public marketing endpoints: /api/newsletter, /api/contact, /api/waitlist, /api/beta
-app.route('/api', marketingRouter);
+app.route('/api', marketingRouter);\n// Isolated synthetic test harness. Disabled in production and has no DB access.\napp.route('/api/test-harness', testHarnessRouter);
 
 app.onError(async (err, c) => {
   const status = (err as any)?.status;
