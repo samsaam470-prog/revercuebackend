@@ -31,9 +31,12 @@ billing.post('/checkout', async (c) => {
   const planKey = String(body.plan ?? '');
   if (!['starter', 'growth', 'scale'].includes(planKey)) return jsonError(c, 400, 'invalid_payload', 'Unknown plan.');
 
-  // prevent duplicate active subscription
-  const existing = await tursoQuery(c.env, `SELECT * FROM subscriptions WHERE user_id = ? AND status IN ('active','trialing','pending') LIMIT 1`, [auth.userId]);
-  if (existing.rows.length) return jsonError(c, 409, 'already_subscribed', 'You already have an active subscription.');
+  // Prevent duplicate active/trialing subscriptions. A stale `pending` row from an
+  // abandoned checkout must not block a new attempt, so retire it first.
+  const active = await tursoQuery(c.env, `SELECT * FROM subscriptions WHERE user_id = ? AND status IN ('active','trialing') LIMIT 1`, [auth.userId]);
+  if (active.rows.length) return jsonError(c, 409, 'already_subscribed', 'You already have an active subscription.');
+  const now0 = new Date().toISOString();
+  await tursoExecute(c.env, `UPDATE subscriptions SET status = 'canceled', canceled_at = ?, updated_at = ? WHERE user_id = ? AND status = 'pending'`, [now0, now0, auth.userId]);
 
   // check prior trial usage for growth
   const priorTrial = await tursoQuery(c.env, `SELECT id FROM subscriptions WHERE user_id = ? AND plan_key = 'growth' AND whop_plan_id = ? LIMIT 1`, [auth.userId, (c.env as any).WHOP_PLAN_GROWTH_TRIAL]);
