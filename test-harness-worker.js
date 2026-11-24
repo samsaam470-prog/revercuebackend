@@ -7,11 +7,11 @@ const PLAN = {
 const allowedOrigin = 'https://test-isolated-plan-harness.revercue.pages.dev';
 const plans = Object.keys(PLAN);
 const ttl = 1200;
-const b64 = (value) => btoa(String.fromCharCode(...new TextEncoder().encode(value))).replaceAll('=', '').replaceAll('+', '-').replaceAll('/', '_');
+const b64 = (value) => { const bytes = typeof value === 'string' ? new TextEncoder().encode(value) : value; let binary = ''; for (const byte of bytes) binary += String.fromCharCode(byte); return btoa(binary).replaceAll('=', '').replaceAll('+', '-').replaceAll('/', '_'); };
 const unb64 = (value) => new TextDecoder().decode(Uint8Array.from(atob(value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4)), c => c.charCodeAt(0)));
 async function signature(value, secret) {
   const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  return b64(String.fromCharCode(...new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value)))));
+  return b64(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(value))));
 }
 async function issue(plan, secret) {
   const now = Math.floor(Date.now() / 1000);
