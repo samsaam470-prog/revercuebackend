@@ -433,12 +433,17 @@ invoices.post('/:id/confirm-payment', async (c) => {
     row.id,
     auth.userId,
   ]);
-  await tursoQuery(
-    c.env,
-    `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at)
-     VALUES (?, ?, 'invoice', ?, ?, 'manual', ?, 'paid', ?, ?)`,
-    [generateId('pay'), auth.userId, row.total ?? 0, row.currency ?? 'USD', row.id, now, now]
-  ).catch((error) => console.error('PAYMENT_RECORD_FAILED', error));
+  // Invoice payment ledger belongs to the separate Turso store in production.
+  // Staging intentionally skips that integration: the disposable D1 environment
+  // has no payment provider or production account database attached.
+  if (c.env.ENVIRONMENT !== 'staging') {
+    await tursoQuery(
+      c.env,
+      `INSERT INTO payments (id, user_id, plan, amount, currency, method, reference, status, paid_at, created_at)
+       VALUES (?, ?, 'invoice', ?, ?, 'manual', ?, 'paid', ?, ?)`,
+      [generateId('pay'), auth.userId, row.total ?? 0, row.currency ?? 'USD', row.id, now, now]
+    ).catch((error) => console.error('PAYMENT_RECORD_FAILED', error));
+  }
 
   await createNotification(c.env, {
     userId: auth.userId,
