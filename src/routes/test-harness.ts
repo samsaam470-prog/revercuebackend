@@ -88,14 +88,14 @@ async function readToken(token: string, secret: string): Promise<{ plan: TestPla
 function enabled(c: { env: Bindings }): boolean {
   return c.env.ENVIRONMENT !== 'production'
     && c.env.TEST_HARNESS_ENABLED === 'true'
-    && Boolean(c.env.TEST_ACCOUNT_NAME && c.env.TEST_ACCOUNT_PASS)
-    && Boolean(c.env.TEST_HARNESS_KEY && c.env.TEST_HARNESS_KEY.length >= 32);
+    && Boolean(c.env.test_account_name && c.env.test_account_pass)
+    && Boolean(c.env.test_harness_key && c.env.test_harness_key.length >= 32);
 }
 
 async function requireSession(c: any): Promise<{ plan: TestPlan } | null> {
   const authorization = c.req.header('Authorization') || '';
   const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
-  return token && c.env.TEST_HARNESS_KEY ? readToken(token, c.env.TEST_HARNESS_KEY) : null;
+  return token && c.env.test_harness_key ? readToken(token, c.env.test_harness_key) : null;
 }
 
 function planSnapshot(plan: TestPlan) {
@@ -133,10 +133,10 @@ router.post('/session', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const name = String(body.name ?? '');
   const password = String(body.password ?? '');
-  if (name !== c.env.TEST_ACCOUNT_NAME || password !== c.env.TEST_ACCOUNT_PASS) {
+  if (name !== c.env.test_account_name || password !== c.env.test_account_pass) {
     return c.json({ error: 'invalid_credentials', message: 'The test account credentials were not accepted.' }, 401);
   }
-  const token = await issueToken('free', c.env.TEST_HARNESS_KEY!);
+  const token = await issueToken('free', c.env.test_harness_key!);
   return c.json({
     success: true,
     token,
@@ -153,7 +153,7 @@ router.post('/plan', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const plan = String(body.plan ?? '') as TestPlan;
   if (!PLAN_NAMES.includes(plan)) return c.json({ error: 'invalid_plan', message: 'Choose Free, Starter, Growth or Scale.' }, 400);
-  return c.json({ success: true, token: await issueToken(plan, c.env.TEST_HARNESS_KEY!), plan: planSnapshot(plan) });
+  return c.json({ success: true, token: await issueToken(plan, c.env.test_harness_key!), plan: planSnapshot(plan) });
 });
 
 router.get('/workspace', async (c) => {

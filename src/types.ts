@@ -105,7 +105,7 @@ export interface Bindings {
   /** Hard cap for uploaded files in bytes. Default: 10 MiB. */
   MAX_UPLOAD_BYTES?: string;
   /** "production" enables stricter behaviour (legacy auth off by default). */
-  ENVIRONMENT?: string;\n  /** Temporary isolated test harness; staging only, never production. */\n  TEST_HARNESS_ENABLED?: string;\n  TEST_ACCOUNT_NAME?: string;\n  TEST_ACCOUNT_PASS?: string;\n  TEST_HARNESS_KEY?: string;
+  ENVIRONMENT?: string;\n  /** Temporary isolated test harness; staging only, never production. */\n  TEST_HARNESS_ENABLED?: string;\n  test_account_name?: string;\n  test_account_pass?: string;\n  test_harness_key?: string;
 }
 
 /** Authenticated request context set by the shared auth middleware. */
