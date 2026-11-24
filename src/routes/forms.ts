@@ -1,3 +1,4 @@
+import { Hono } from 'hono';
 import { dbFirst, dbQuery, dbRun } from '../utils/db';
 import { generateId, generatePublicId } from '../utils/ids';
 import { userAuthMiddleware, getAuth } from '../middleware/user-auth';

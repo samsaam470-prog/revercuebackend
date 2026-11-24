@@ -1,3 +1,4 @@
+import { Hono } from 'hono';
 import bcrypt from 'bcryptjs';
 import { dbQuery, dbFirst, dbRun } from '../utils/db';
 import { tursoQuery } from '../utils/turso';

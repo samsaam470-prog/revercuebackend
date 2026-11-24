@@ -1,3 +1,4 @@
+import { Hono } from 'hono';
 import { fixWithPatterns } from '../services/patterns';
 import { organizeSections, normaliseSection } from '../services/organizer';
 import { resolveVisuals } from '../services/visuals';

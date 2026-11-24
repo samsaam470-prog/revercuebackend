@@ -1,3 +1,4 @@
+import { Hono } from 'hono';
 import { dbFirst, dbQuery, dbRun } from '../utils/db';
 import { tursoQuery } from '../utils/turso';
 import { generateId, generatePublicId } from '../utils/ids';

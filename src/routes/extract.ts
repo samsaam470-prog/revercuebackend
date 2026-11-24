@@ -1,3 +1,4 @@
+import { Hono } from 'hono';
 import { runLayer1, fetchVisualAssets } from '../services/pipeline';
 import { userAuthMiddleware } from '../middleware/user-auth';
 import { checkRateLimit } from '../services/rate-limit';

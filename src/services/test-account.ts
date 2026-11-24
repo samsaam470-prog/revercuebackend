@@ -232,7 +232,7 @@ export async function seedTestEnvironment(
       env,
       `INSERT INTO clients (id, user_id, name, email, company, phone, channel, industry, target_audience, website_url, source, status, interest_level, last_message_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, NULL, 'email', ?, ?, ?, 'manual', 'active', ?, ?, ?, ?)`,
-      [id, TEST_ACCOUNT_ID, name, email, company, industry, audience, website, interest, now, now]
+      [id, TEST_ACCOUNT_ID, name, email, company, industry, audience, website, interest, now, now, now]
     );
   }
 
@@ -563,13 +563,13 @@ export async function seedTestEnvironment(
   await attempt(warnings, 'revision prices', async () => {
     await dbRun(
       env,
-      `INSERT INTO revision_prices (user_id, category, price, updated_at) VALUES (?, ?, ?, ?)`,
-      [TEST_ACCOUNT_ID, 'Extra page', 180, now]
+      `INSERT INTO revision_prices (user_id, category, price, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+      [TEST_ACCOUNT_ID, 'Extra page', 180, now, now]
     );
     await dbRun(
       env,
-      `INSERT INTO revision_prices (user_id, category, price, updated_at) VALUES (?, ?, ?, ?)`,
-      [TEST_ACCOUNT_ID, 'Copy rewrite', 90, now]
+      `INSERT INTO revision_prices (user_id, category, price, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+      [TEST_ACCOUNT_ID, 'Copy rewrite', 90, now, now]
     );
   });
 
@@ -614,7 +614,8 @@ export async function clearTestProductData(env: Bindings): Promise<string[]> {
   ];
   for (const sql of docScoped) {
     await attempt(warnings, sql.slice(0, 60), async () => {
-      await dbRun(env, sql, [TEST_ACCOUNT_ID, TEST_ACCOUNT_ID, TEST_ACCOUNT_ID, TEST_ACCOUNT_ID]);
+      const placeholderCount = (sql.match(/\?/g) ?? []).length;
+      await dbRun(env, sql, Array(placeholderCount).fill(TEST_ACCOUNT_ID));
     });
   }
 
