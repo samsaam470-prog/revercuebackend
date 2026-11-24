@@ -23,7 +23,6 @@ import extractRouter from './routes/extract';
 import organizeRouter from './routes/organize';
 import summaryRouter from './routes/summary';
 import marketingRouter from './routes/marketing';
-import testHarnessRouter from './routes/test-harness';
 import { runHourly } from './cron/summary';
 import { runAuthActionSync } from './services/authaction-sync';
 import { runPublishCron } from './cron/publish';
@@ -103,33 +102,28 @@ app.route('/api/organize', organizeRouter);
 app.route('/api/summary', summaryRouter);
 // Public marketing endpoints: /api/newsletter, /api/contact, /api/waitlist, /api/beta
 app.route('/api', marketingRouter);
-// Isolated synthetic test harness. Disabled in production and has no DB access.
-app.route('/api/test-harness', testHarnessRouter);
 
 app.onError(async (err, c) => {
   const status = (err as any)?.status;
   const reference = newReferenceCode();
   console.error('UNHANDLED_ERROR', reference, c.req.method, c.req.path, err);
-  // The isolated test harness must never reach the production error-log store.
-  if (!c.req.path.startsWith('/api/test-harness')) {
-    try {
-      const { tursoExecute } = await import('./utils/turso');
-      const { generateId } = await import('./utils/ids');
-      await tursoExecute(
-        c.env,
-        `INSERT INTO error_logs (id, reference_code, route, message, stack, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          generateId('err'),
-          reference,
-          `${c.req.method} ${c.req.path}`,
-          String(err?.message ?? 'unknown').slice(0, 1000),
-          String(err?.stack ?? '').slice(0, 4000),
-          new Date().toISOString(),
-        ]
-      );
-    } catch (logError) {
-      console.error('ERROR_LOG_WRITE_FAILED', logError);
-    }
+  try {
+    const { tursoExecute } = await import('./utils/turso');
+    const { generateId } = await import('./utils/ids');
+    await tursoExecute(
+      c.env,
+      `INSERT INTO error_logs (id, reference_code, route, message, stack, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        generateId('err'),
+        reference,
+        `${c.req.method} ${c.req.path}`,
+        String(err?.message ?? 'unknown').slice(0, 1000),
+        String(err?.stack ?? '').slice(0, 4000),
+        new Date().toISOString(),
+      ]
+    );
+  } catch (logError) {
+    console.error('ERROR_LOG_WRITE_FAILED', logError);
   }
   return c.json(
     {
