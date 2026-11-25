@@ -48,7 +48,9 @@ function evaluatePattern(rule: any[], ctx: any): boolean {
 }
 
 export async function generateSuggestions(env: Bindings, userId: string, plan: string): Promise<Suggestion[]> {
-  if (plan === 'free' || plan === 'starter') return [];
+  // Every plan gets the basic follow-up. Free stops there; Starter and above also
+  // read the pattern pairings for their plan (Starter adds previous outreach patterns).
+  if (plan === 'free') return await fallbackFollowUps(env, userId);
 
   const pairings = await loadActivePairings(env, plan);
   if (pairings.length === 0) {
