@@ -1,6 +1,7 @@
 import { dbFirst, dbQuery } from '../utils/db';
 import { tursoQuery } from '../utils/turso';
 import { ACTIVE_DOCUMENT_LIMIT, ADAPTIVE_FORM_LIMIT } from '../config/constants';
+import { getEffectiveLimits } from './entitlements';
 import type { Bindings } from '../types';
 
 /**
@@ -48,7 +49,8 @@ export async function checkActiveDocumentLimit(
   alreadyPublished = false
 ): Promise<ActiveLimitResult> {
   const plan = await planFor(env, userId);
-  const limit = ACTIVE_DOCUMENT_LIMIT[plan as keyof typeof ACTIVE_DOCUMENT_LIMIT] ?? 5;
+  const limits = await getEffectiveLimits(env, userId);
+  const limit = limits.active_documents;
   const used = await countActiveDocuments(env, userId);
   if (alreadyPublished) return { allowed: true, limit, used };
   return { allowed: used < limit, limit, used };
@@ -87,7 +89,8 @@ export async function checkAdaptiveFormLimit(
   excludeFormId?: string
 ): Promise<ActiveLimitResult> {
   const plan = await planFor(env, userId);
-  const limit = ADAPTIVE_FORM_LIMIT[plan as keyof typeof ADAPTIVE_FORM_LIMIT] ?? 0;
+  const limits = await getEffectiveLimits(env, userId);
+  const limit = limits.adaptive_forms;
   if (alreadyAdaptive) return { allowed: true, limit, used: 0 };
   const rows = await dbQuery<{ id: string; branching: string }>(
     env,

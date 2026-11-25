@@ -31,6 +31,7 @@ import {
   DEFAULT_MAX_UPLOAD_BYTES,
 } from '../config/constants';
 import { countActiveDocuments } from '../services/plan-limits';
+import { getEntitlementSnapshot } from '../services/entitlements';
 import type { Bindings } from '../types';
 
 const settings = new Hono<{ Bindings: Bindings }>();
@@ -126,6 +127,7 @@ settings.get('/plan', async (c) => {
   const user = await tursoQuery(c.env, `SELECT plan, plan_expires_at FROM users WHERE id = ? LIMIT 1`, [auth.userId]);
   const plan = String(user.rows[0]?.plan ?? 'free');
   const trial = await getActiveTrial(c.env, auth.userId);
+  const entitlements = await getEntitlementSnapshot(c.env, auth.userId);
 
   const [activeDocs, archived, protectedDocs, storage, payments] = await Promise.all([
     countActiveDocuments(c.env, auth.userId).then((count) => ({ c: count })),
@@ -141,21 +143,23 @@ settings.get('/plan', async (c) => {
     tursoQuery(c.env, `SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`, [auth.userId]),
   ]);
 
-  const storageLimitMb = STORAGE_MB[plan as keyof typeof STORAGE_MB] ?? 50;
+  const storageLimitMb = entitlements.limits.storage_mb;
   return c.json({
     plan,
     expires_at: user.rows[0]?.plan_expires_at ?? null,
     renewal_date: user.rows[0]?.plan_expires_at ?? null,
     trial,
+    entitlements,
     active_documents: Number(activeDocs?.c ?? 0),
     archive_count: Number(archived?.c ?? 0),
     password_protected: Number(protectedDocs?.c ?? 0),
     storage_gb: Number(((Number(storage?.total ?? 0) / (1024 * 1024)) / 1024).toFixed(3)),
     limits: {
-      active_documents: ACTIVE_DOCUMENT_LIMIT[plan as keyof typeof ACTIVE_DOCUMENT_LIMIT] ?? null,
+      active_documents: entitlements.limits.active_documents,
       storage_gb: Number((storageLimitMb / 1024).toFixed(3)),
-      archive_count: ARCHIVE_COUNT_LIMIT[plan as keyof typeof ARCHIVE_COUNT_LIMIT] ?? null,
-      password_protected: PASSWORD_PROTECTED_LIMIT[plan as keyof typeof PASSWORD_PROTECTED_LIMIT] ?? 0,
+      archive_count: entitlements.limits.archive_count,
+      password_protected: entitlements.limits.password_protected,
+      bonus_active: Boolean(entitlements.bonus || entitlements.combined || entitlements.addons.length),
     },
     payments: payments.rows,
   });

@@ -5,6 +5,7 @@ import { generateId } from '../utils/ids';
 import { tursoQuery } from '../utils/turso';
 import { dbFirst, dbRun } from '../utils/db';
 import { STORAGE_MB, DEFAULT_MAX_UPLOAD_BYTES } from '../config/constants';
+import { getEffectiveLimits } from '../services/entitlements';
 import { createSignedToken, verifySignedToken } from '../utils/crypto';
 import { jsonError } from '../utils/api-errors';
 import type { Bindings } from '../types';
@@ -112,9 +113,8 @@ files.post('/upload', userAuthMiddleware, async (c) => {
     return jsonError(c, 400, 'invalid_file_type', 'That file type is not allowed.');
   }
 
-  const user = await tursoQuery(c.env, `SELECT plan FROM users WHERE id = ? LIMIT 1`, [auth.userId]);
-  const plan = String(user.rows[0]?.plan ?? 'free');
-  const limitMb = STORAGE_MB[plan as keyof typeof STORAGE_MB] ?? 50;
+  const limits = await getEffectiveLimits(c.env, auth.userId);
+  const limitMb = limits.storage_mb;
 
   const used = await dbFirst<{ total: number }>(
     c.env,

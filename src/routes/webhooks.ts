@@ -4,7 +4,24 @@ import { tursoQuery, tursoExecute } from '../utils/turso';
 import { generateId } from '../utils/ids';
 import { planKeyFromWhopId } from '../services/whop';
 import { grantGrowthTrial, endGrowthTrial } from '../services/trials';
+import { completeTransition } from '../services/subscription-lifecycle';
 import type { Bindings } from '../types';
+
+/**
+ * True when this subscription is still the one that decides the user's plan.
+ * An old membership (for example the cancelled Growth one after a Scale
+ * purchase) must never write over newer state.
+ */
+async function isCurrentSubscription(env: Bindings, userId: string, subscriptionId: string | null): Promise<boolean> {
+  if (!subscriptionId) return true;
+  const rows = await tursoQuery(
+    env,
+    `SELECT id FROM subscriptions WHERE user_id = ? AND status IN ('active','trialing') ORDER BY created_at DESC LIMIT 1`,
+    [userId]
+  );
+  const currentId = rows.rows[0]?.id ? String(rows.rows[0].id) : null;
+  return !currentId || currentId === subscriptionId;
+}
 
 /**
  * A Growth purchase includes fourteen days of Scale access. Whop's trial only
@@ -26,6 +43,11 @@ async function syncPlanForMembership(
   const trialPlanId = (env as any).WHOP_PLAN_GROWTH_TRIAL ?? null;
   const isGrowthTrial =
     input.planKey === 'growth' && Boolean(trialPlanId) && input.whopPlanId === trialPlanId;
+
+  if (!(await isCurrentSubscription(env, input.userId, input.subscriptionId))) {
+    // Old membership: record the row but never touch the user's plan.
+    return;
+  }
 
   if (input.status === 'trialing') {
     if (isGrowthTrial) {
@@ -54,8 +76,31 @@ async function syncPlanForMembership(
     return;
   }
 
-  if (['canceled', 'expired'].includes(input.status) && isGrowthTrial) {
-    await endGrowthTrial(env, input.userId, 'canceled', input.planKey);
+  if (input.status === 'past_due' || input.status === 'unresolved') {
+    // A failed charge is not a cancellation: keep the plan while Whop retries.
+    await tursoExecute(env, `UPDATE subscriptions SET status = 'past_due', updated_at = ? WHERE id = ?`, [
+      now,
+      input.subscriptionId,
+    ]).catch(() => undefined);
+    return;
+  }
+
+  if (['canceled', 'expired'].includes(input.status)) {
+    if (isGrowthTrial) await endGrowthTrial(env, input.userId, 'canceled', input.planKey);
+    // The paid period is over: no other active membership means the account
+    // settles on Free. Documents are untouched (they are archived, never
+    // deleted, and nothing here writes to a document table).
+    const other = await tursoQuery(
+      env,
+      `SELECT id FROM subscriptions WHERE user_id = ? AND status IN ('active','trialing') AND id != ? LIMIT 1`,
+      [input.userId, input.subscriptionId]
+    ).catch(() => ({ rows: [] as any[] }));
+    if (!other.rows.length) {
+      await tursoExecute(env, `UPDATE users SET plan = 'free', plan_expires_at = NULL, updated_at = ? WHERE id = ?`, [
+        now,
+        input.userId,
+      ]);
+    }
   }
 }
 
@@ -131,11 +176,21 @@ webhooks.post('/whop', async (c) => {
         sub = r.rows[0] ?? null;
       }
 
+      const metadata = (data.metadata && typeof data.metadata === 'object' ? data.metadata : {}) as Record<string, string>;
+
+      // A membership created from one of our checkouts completes the pending
+      // transition only from this verified Whop data — never from a redirect.
+      if (metadata.transition_id) {
+        await completeTransition(c.env, String(metadata.transition_id), membershipId || null, status, periodEnd).catch((e) =>
+          console.error('TRANSITION_COMPLETE_FAILED', e)
+        );
+      }
+
       if (sub) {
         const planKey = sub.plan_key;
         await tursoExecute(c.env,
-          `UPDATE subscriptions SET whop_membership_id = COALESCE(whop_membership_id, ?), whop_plan_id = COALESCE(whop_plan_id, ?), status = ?, current_period_end = COALESCE(?, current_period_end), updated_at = ? WHERE id = ?`,
-          [membershipId, whopPlanId, status, periodEnd, now, sub.id]);
+          `UPDATE subscriptions SET whop_membership_id = COALESCE(whop_membership_id, ?), whop_plan_id = COALESCE(whop_plan_id, ?), status = ?, cancel_at_period_end = ?, current_period_end = COALESCE(?, current_period_end), updated_at = ? WHERE id = ?`,
+          [membershipId, whopPlanId, status, data.cancel_at_period_end ? 1 : 0, periodEnd, now, sub.id]);
         await syncPlanForMembership(c.env, {
           userId: sub.user_id,
           subscriptionId: sub.id,
@@ -144,6 +199,26 @@ webhooks.post('/whop', async (c) => {
           whopPlanId: whopPlanId ?? sub.whop_plan_id ?? null,
           periodEnd,
         });
+
+        // Pausing is not cancelling. Access follows the pause, and the plan is
+        // restored only by an explicit resume.
+        const paused = status === 'paused' || Boolean(data.paused_at) || data.most_recent_action === 'paused';
+        if (paused) {
+          const existingPause = await tursoQuery(
+            c.env,
+            `SELECT id FROM subscription_pauses WHERE user_id = ? AND status = 'paused' LIMIT 1`,
+            [sub.user_id]
+          );
+          if (!existingPause.rows.length) {
+            await tursoExecute(
+              c.env,
+              `INSERT INTO subscription_pauses (id, user_id, subscription_id, whop_membership_id, prior_plan, status, paused_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+              [generateId('pau'), sub.user_id, sub.id, membershipId, planKey, 'paused', now, now, now]
+            ).catch(() => undefined);
+          }
+          await tursoExecute(c.env, `UPDATE subscriptions SET status = 'paused', updated_at = ? WHERE id = ?`, [now, sub.id]).catch(() => undefined);
+          await tursoExecute(c.env, `UPDATE users SET plan = 'free', updated_at = ? WHERE id = ?`, [now, sub.user_id]).catch(() => undefined);
+        }
       } else if (userId) {
         // No subscription row yet; create one if we can resolve a plan key.
         let planKey = metadataPlan ?? planKeyFromWhopId(c.env, whopPlanId ?? '');
@@ -195,11 +270,31 @@ webhooks.post('/whop', async (c) => {
       await tursoExecute(c.env,
         `INSERT OR IGNORE INTO subscription_payments (id, user_id, subscription_id, whop_payment_id, amount, currency, status, paid_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
         [generateId('pay'), sub?.user_id ?? extractUserId(data) ?? '', sub?.id ?? null, paymentId, amount, currency, status, now, now, now]);
+      const paymentMetadata = (data.metadata && typeof data.metadata === 'object' ? data.metadata : {}) as Record<string, string>;
+
+      if (status === 'succeeded' && paymentMetadata.transition_id) {
+        // Payment is confirmed by Whop, but activation still needs the
+        // membership; completeTransition is a no-op for a non-active one.
+        await completeTransition(
+          c.env,
+          String(paymentMetadata.transition_id),
+          membershipId ? String(membershipId) : null,
+          'active',
+          null
+        ).catch((e) => console.error('TRANSITION_COMPLETE_FAILED', e));
+      }
+
       if (sub && status === 'succeeded') {
         await tursoExecute(c.env, `UPDATE subscriptions SET status = 'active', updated_at = ? WHERE id = ?`, [now, sub.id]);
         // A paid conversion ends the Scale window and settles on the bought plan.
         await endGrowthTrial(c.env, sub.user_id, 'converted', sub.plan_key);
         await tursoExecute(c.env, `UPDATE users SET plan = ?, updated_at = ? WHERE id = ?`, [sub.plan_key, now, sub.user_id]);
+      }
+
+      if (sub && ['failed', 'canceled'].includes(status)) {
+        // Do not revoke access on a failed renewal: Whop retries, and the plan
+        // is only settled when the membership itself is cancelled or expired.
+        await tursoExecute(c.env, `UPDATE subscriptions SET status = 'past_due', updated_at = ? WHERE id = ?`, [now, sub.id]).catch(() => undefined);
       }
     }
 

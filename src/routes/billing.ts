@@ -3,7 +3,20 @@ import { getAuth } from '../middleware/user-auth';
 import { jsonError } from '../utils/api-errors';
 import { tursoQuery, tursoExecute } from '../utils/turso';
 import { generateId } from '../utils/ids';
-import { whopBase, whopHeaders, planIdFor, whopCreateCheckout, whopCancelMembership } from '../services/whop';
+import { whopBase, whopHeaders, planIdFor, whopCreateCheckout, whopCancelMembership, whopReverseCancellation } from '../services/whop';
+import {
+  startUpgrade,
+  startDowngrade,
+  startCapacityCheckout,
+  cancelTransition,
+  pauseSubscription,
+  resumeSubscription,
+  verifyTransition,
+  getCapacityOptions,
+  listTransitions,
+} from '../services/subscription-lifecycle';
+import { getEntitlementSnapshot } from '../services/entitlements';
+import { PLAN_PRICES } from '../config/constants';
 import {
   getActiveTrial,
   grantGrowthTrial,
@@ -98,9 +111,124 @@ billing.post('/reactivate', async (c) => {
   const rows = await tursoQuery(c.env, `SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`, [auth.userId]);
   const sub = rows.rows[0];
   if (!sub) return jsonError(c, 404, 'not_found', 'No subscription.');
+  // Reverse the pending cancellation in Whop too, not just locally.
+  if (sub.whop_membership_id) await whopReverseCancellation(c.env, String(sub.whop_membership_id));
   const now = new Date().toISOString();
   await tursoExecute(c.env, `UPDATE subscriptions SET cancel_at_period_end = 0, canceled_at = NULL, updated_at = ? WHERE id = ?`, [now, sub.id]);
   return c.json({ success: true });
+});
+
+/**
+ * Everything the customer's billing screen needs in one trusted payload:
+ * effective limits, bonus windows, add-ons and any over-limit state.
+ */
+billing.get('/entitlements', async (c) => {
+  const auth = getAuth(c);
+  const [snapshot, capacity, transitions] = await Promise.all([
+    getEntitlementSnapshot(c.env, auth.userId),
+    getCapacityOptions(c.env, auth.userId),
+    listTransitions(c.env, auth.userId),
+  ]);
+  const trialPlanId = String((c.env as any).WHOP_PLAN_GROWTH_TRIAL ?? '');
+  const scalePlanId = String((c.env as any).WHOP_PLAN_SCALE ?? '');
+  return c.json({
+    ...snapshot,
+    capacity,
+    transitions,
+    plans: {
+      growth: {
+        price: PLAN_PRICES.growth,
+        trial_plan_configured: Boolean(trialPlanId),
+        checklist: 'Buying Growth starts 14 days of normal Scale limits at no extra charge.',
+      },
+      scale: {
+        price: PLAN_PRICES.scale,
+        plan_configured: Boolean(scalePlanId),
+        note: 'Continuing with Scale is a new $49/month subscription. Whop asks for payment details again.',
+      },
+    },
+  });
+});
+
+billing.post('/upgrade', async (c) => {
+  const auth = getAuth(c);
+  const body = await c.req.json().catch(() => ({}));
+  const result = await startUpgrade(c.env, auth.userId, String(body.plan ?? ''), body.redirect_url ?? undefined);
+  if (!result.ok) return jsonError(c, result.status, result.error, result.detail ?? 'The upgrade could not be started.');
+  return c.json({
+    success: true,
+    transition_id: result.transition.id,
+    checkout_url: result.checkout_url,
+    trial_days: result.trial_days,
+    mode: result.mode,
+    starts_at: result.starts_at,
+    combined_ends_at: result.combined_ends_at,
+  });
+});
+
+billing.post('/downgrade', async (c) => {
+  const auth = getAuth(c);
+  const body = await c.req.json().catch(() => ({}));
+  const result = await startDowngrade(c.env, auth.userId, String(body.plan ?? ''), body.redirect_url ?? undefined);
+  if (!result.ok) return jsonError(c, result.status, result.error, result.detail ?? 'The downgrade could not be started.');
+  return c.json({
+    success: true,
+    transition_id: result.transition.id,
+    checkout_url: result.checkout_url,
+    canceled_membership: result.canceled_membership,
+  });
+});
+
+billing.post('/verify', async (c) => {
+  const auth = getAuth(c);
+  const body = await c.req.json().catch(() => ({}));
+  const transitionId = String(body.transition_id ?? '');
+  if (!transitionId) return jsonError(c, 400, 'invalid_payload', 'A transition id is required.');
+  const result = await verifyTransition(c.env, auth.userId, transitionId, body.membership_id ?? null, body.payment_id ?? null);
+  if (!result.ok) return jsonError(c, result.status, result.error, 'The payment could not be verified yet.');
+  return c.json({ verified: Boolean(result.completed), pending: Boolean(result.pending) });
+});
+
+billing.post('/transition/:id/cancel', async (c) => {
+  const auth = getAuth(c);
+  const result = await cancelTransition(c.env, auth.userId, c.req.param('id'));
+  if (!result.ok) return jsonError(c, result.status, result.error ?? 'not_found', 'Nothing to cancel.');
+  return c.json({ success: true });
+});
+
+billing.post('/pause', async (c) => {
+  const auth = getAuth(c);
+  const body = await c.req.json().catch(() => ({}));
+  const until = body.until ? String(body.until) : undefined;
+  if (until && !Number.isFinite(new Date(until).getTime())) return jsonError(c, 400, 'invalid_payload', 'The resume date is invalid.');
+  const result = await pauseSubscription(c.env, auth.userId, until);
+  if (!result.ok) return jsonError(c, result.status, result.error ?? 'pause_failed', 'The subscription could not be paused.');
+  return c.json({ success: true, paused: true, resume_at: until ?? null });
+});
+
+billing.post('/resume', async (c) => {
+  const auth = getAuth(c);
+  const result = await resumeSubscription(c.env, auth.userId);
+  if (!result.ok) return jsonError(c, result.status, result.error ?? 'resume_failed', 'The subscription could not be resumed.');
+  return c.json({ success: true, paused: false });
+});
+
+billing.get('/capacity/options', async (c) => {
+  const auth = getAuth(c);
+  return c.json(await getCapacityOptions(c.env, auth.userId));
+});
+
+billing.post('/capacity/checkout', async (c) => {
+  const auth = getAuth(c);
+  const body = await c.req.json().catch(() => ({}));
+  const result = await startCapacityCheckout(c.env, auth.userId, String(body.offer ?? ''), body.redirect_url ?? undefined);
+  if (!result.ok) return jsonError(c, result.status, result.error, result.detail ?? 'The capacity offer could not be started.');
+  return c.json({
+    success: true,
+    addon_id: result.addon_id,
+    transition_id: result.transition_id,
+    checkout_url: result.checkout_url,
+  });
 });
 
 billing.post('/change-plan', async (c) => {
