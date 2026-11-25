@@ -9,6 +9,7 @@ import { checkRateLimit } from '../services/rate-limit';
 import { userAuthMiddleware, getAuth } from '../middleware/user-auth';
 import { getOnboardingState } from '../services/onboarding';
 import { contactEmail } from '../utils/contact-email';
+import { getActiveTrial } from '../services/trials';
 import type { Bindings } from '../types';
 
 /**
@@ -132,6 +133,8 @@ auth.get('/me', userAuthMiddleware, async (c) => {
   const u = result.rows[0];
   const accountEmail = contactEmail(u.email);
   const onboarding = getOnboardingState(u);
+  // Growth includes fourteen days of Scale access; the app shows the window.
+  const trial = await getActiveTrial(c.env, authCtx.userId);
   return c.json({
     authenticated: true,
     user: {
@@ -141,6 +144,7 @@ auth.get('/me', userAuthMiddleware, async (c) => {
       name: u.name,
       plan: u.plan,
       plan_expires_at: u.plan_expires_at ?? null,
+      trial,
       onboarding_step: onboarding.step,
       onboarding_required: onboarding.required,
       onboarding_complete: onboarding.complete,

@@ -6,6 +6,7 @@ import { generateId } from '../utils/ids';
 import { userAuthMiddleware, getAuth } from '../middleware/user-auth';
 import { getRevenueSummary, addExpense } from '../services/revenue';
 import { getPriceSuggestion } from '../services/price-suggestion';
+import { getActiveTrial } from '../services/trials';
 import { putObject } from '../services/storage';
 import { buildPdf, pdfResponse } from '../services/pdf-binary';
 import { jsonError } from '../utils/api-errors';
@@ -124,6 +125,7 @@ settings.get('/plan', async (c) => {
   const auth = getAuth(c);
   const user = await tursoQuery(c.env, `SELECT plan, plan_expires_at FROM users WHERE id = ? LIMIT 1`, [auth.userId]);
   const plan = String(user.rows[0]?.plan ?? 'free');
+  const trial = await getActiveTrial(c.env, auth.userId);
 
   const [activeDocs, archived, protectedDocs, storage, payments] = await Promise.all([
     countActiveDocuments(c.env, auth.userId).then((count) => ({ c: count })),
@@ -144,6 +146,7 @@ settings.get('/plan', async (c) => {
     plan,
     expires_at: user.rows[0]?.plan_expires_at ?? null,
     renewal_date: user.rows[0]?.plan_expires_at ?? null,
+    trial,
     active_documents: Number(activeDocs?.c ?? 0),
     archive_count: Number(archived?.c ?? 0),
     password_protected: Number(protectedDocs?.c ?? 0),

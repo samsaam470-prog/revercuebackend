@@ -4,17 +4,22 @@ import { jsonError } from '../utils/api-errors';
 import { tursoQuery, tursoExecute } from '../utils/turso';
 import { generateId } from '../utils/ids';
 import { whopBase, whopHeaders, planIdFor, whopCreateCheckout, whopCancelMembership } from '../services/whop';
+import {
+  getActiveTrial,
+  grantGrowthTrial,
+  GROWTH_TRIAL_DAYS,
+  GROWTH_TRIAL_ACCESS_PLAN,
+} from '../services/trials';
 import type { Bindings } from '../types';
 
 const billing = new Hono<{ Bindings: Bindings }>();
 
-function growthTrialEligible(env: Bindings, alreadyUsedTrial: boolean): boolean {
-  if (alreadyUsedTrial) return false;
-  const start = (env as any).WHOP_GROWTH_PROMO_START;
-  const end = (env as any).WHOP_GROWTH_PROMO_END;
-  if (!start || !end) return false;
-  const now = Date.now();
-  return now >= new Date(start).getTime() && now <= new Date(end).getTime();
+/**
+ * The 14 days of Scale access are part of Growth itself now, not a promo: the
+ * only thing that stops a trial is having used it before.
+ */
+function growthTrialEligible(alreadyUsedTrial: boolean): boolean {
+  return !alreadyUsedTrial;
 }
 
 billing.get('/subscription', async (c) => {
@@ -22,7 +27,23 @@ billing.get('/subscription', async (c) => {
   const rows = await tursoQuery(c.env, `SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1`, [auth.userId]);
   const sub = rows.rows[0] ?? null;
   const payments = await tursoQuery(c.env, `SELECT * FROM subscription_payments WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`, [auth.userId]);
-  return c.json({ subscription: sub, payments: payments.rows });
+
+  // If a membership webhook was missed, a trial subscription still gets the
+  // access it paid for: the open window is rebuilt from the subscription row.
+  let trial = await getActiveTrial(c.env, auth.userId);
+  if (!trial && sub && sub.status === 'trialing' && sub.plan_key === 'growth') {
+    const trialPlanId = (c.env as any).WHOP_PLAN_GROWTH_TRIAL;
+    if (trialPlanId && sub.whop_plan_id === trialPlanId) {
+      await grantGrowthTrial(c.env, {
+        userId: auth.userId,
+        subscriptionId: sub.id,
+        endsAt: sub.current_period_end ?? undefined,
+      });
+      trial = await getActiveTrial(c.env, auth.userId);
+    }
+  }
+
+  return c.json({ subscription: sub, payments: payments.rows, trial });
 });
 
 billing.post('/checkout', async (c) => {
@@ -40,7 +61,7 @@ billing.post('/checkout', async (c) => {
 
   // check prior trial usage for growth
   const priorTrial = await tursoQuery(c.env, `SELECT id FROM subscriptions WHERE user_id = ? AND plan_key = 'growth' AND whop_plan_id = ? LIMIT 1`, [auth.userId, (c.env as any).WHOP_PLAN_GROWTH_TRIAL]);
-  const trial = planKey === 'growth' && growthTrialEligible(c.env, priorTrial.rows.length > 0);
+  const trial = planKey === 'growth' && growthTrialEligible(priorTrial.rows.length > 0);
 
   const whopPlanId = planIdFor(c.env, planKey, trial);
   if (!whopPlanId) return jsonError(c, 500, 'misconfigured', 'Plan not configured.');
@@ -52,7 +73,13 @@ billing.post('/checkout', async (c) => {
   await tursoExecute(c.env, `INSERT INTO subscriptions (id, user_id, provider, whop_plan_id, plan_key, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)`,
     [generateId('sub'), auth.userId, 'whop', whopPlanId, planKey, 'pending', now, now]);
 
-  return c.json({ checkout_id: checkout.id, checkout_url: checkout.url, trial });
+  return c.json({
+    checkout_id: checkout.id,
+    checkout_url: checkout.url,
+    trial,
+    trial_days: trial ? GROWTH_TRIAL_DAYS : 0,
+    trial_access_plan: trial ? GROWTH_TRIAL_ACCESS_PLAN : null,
+  });
 });
 
 billing.post('/cancel', async (c) => {

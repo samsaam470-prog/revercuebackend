@@ -67,7 +67,7 @@ app.get('/api/health', (c) =>
   c.json({
     ok: true,
     status: 'healthy',
-    version: '2.1.1',
+    version: '2.1.2',
     timestamp: new Date().toISOString(),
     api_base_url: c.env.API_BASE_URL ?? 'https://api.revercue.co.uk',
     features: {

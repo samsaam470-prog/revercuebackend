@@ -3,7 +3,61 @@ import { jsonError } from '../utils/api-errors';
 import { tursoQuery, tursoExecute } from '../utils/turso';
 import { generateId } from '../utils/ids';
 import { planKeyFromWhopId } from '../services/whop';
+import { grantGrowthTrial, endGrowthTrial } from '../services/trials';
 import type { Bindings } from '../types';
+
+/**
+ * A Growth purchase includes fourteen days of Scale access. Whop's trial only
+ * discounts the plan that was bought, so `users.plan` holds the effective plan:
+ * Scale while the Growth trial is open, Growth once it converts or ends.
+ */
+async function syncPlanForMembership(
+  env: Bindings,
+  input: {
+    userId: string;
+    subscriptionId: string | null;
+    planKey: string;
+    status: string;
+    whopPlanId: string | null;
+    periodEnd: string | null;
+  }
+): Promise<void> {
+  const now = new Date().toISOString();
+  const trialPlanId = (env as any).WHOP_PLAN_GROWTH_TRIAL ?? null;
+  const isGrowthTrial =
+    input.planKey === 'growth' && Boolean(trialPlanId) && input.whopPlanId === trialPlanId;
+
+  if (input.status === 'trialing') {
+    if (isGrowthTrial) {
+      await grantGrowthTrial(env, {
+        userId: input.userId,
+        subscriptionId: input.subscriptionId,
+        endsAt: input.periodEnd ?? undefined,
+      });
+      return;
+    }
+    await tursoExecute(env, `UPDATE users SET plan = ?, updated_at = ? WHERE id = ?`, [
+      input.planKey,
+      now,
+      input.userId,
+    ]);
+    return;
+  }
+
+  if (['active', 'completed'].includes(input.status)) {
+    if (isGrowthTrial) await endGrowthTrial(env, input.userId, 'converted', input.planKey);
+    await tursoExecute(env, `UPDATE users SET plan = ?, updated_at = ? WHERE id = ?`, [
+      input.planKey,
+      now,
+      input.userId,
+    ]);
+    return;
+  }
+
+  if (['canceled', 'expired'].includes(input.status) && isGrowthTrial) {
+    await endGrowthTrial(env, input.userId, 'canceled', input.planKey);
+  }
+}
 
 const webhooks = new Hono<{ Bindings: Bindings }>();
 
@@ -82,9 +136,14 @@ webhooks.post('/whop', async (c) => {
         await tursoExecute(c.env,
           `UPDATE subscriptions SET whop_membership_id = COALESCE(whop_membership_id, ?), whop_plan_id = COALESCE(whop_plan_id, ?), status = ?, current_period_end = COALESCE(?, current_period_end), updated_at = ? WHERE id = ?`,
           [membershipId, whopPlanId, status, periodEnd, now, sub.id]);
-        if (['active', 'trialing'].includes(status)) {
-          await tursoExecute(c.env, `UPDATE users SET plan = ?, updated_at = ? WHERE id = ?`, [planKey, now, sub.user_id]);
-        }
+        await syncPlanForMembership(c.env, {
+          userId: sub.user_id,
+          subscriptionId: sub.id,
+          planKey,
+          status,
+          whopPlanId: whopPlanId ?? sub.whop_plan_id ?? null,
+          periodEnd,
+        });
       } else if (userId) {
         // No subscription row yet; create one if we can resolve a plan key.
         let planKey = metadataPlan ?? planKeyFromWhopId(c.env, whopPlanId ?? '');
@@ -93,9 +152,14 @@ webhooks.post('/whop', async (c) => {
           await tursoExecute(c.env,
             `INSERT INTO subscriptions (id, user_id, provider, whop_membership_id, whop_plan_id, plan_key, status, current_period_end, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
             [subId, userId, 'whop', membershipId, whopPlanId, planKey, status, periodEnd, now, now]);
-          if (['active', 'trialing'].includes(status)) {
-            await tursoExecute(c.env, `UPDATE users SET plan = ?, updated_at = ? WHERE id = ?`, [planKey, now, userId]);
-          }
+          await syncPlanForMembership(c.env, {
+            userId,
+            subscriptionId: subId,
+            planKey,
+            status,
+            whopPlanId: whopPlanId ?? null,
+            periodEnd,
+          });
         }
       }
 
@@ -132,8 +196,10 @@ webhooks.post('/whop', async (c) => {
         `INSERT OR IGNORE INTO subscription_payments (id, user_id, subscription_id, whop_payment_id, amount, currency, status, paid_at, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`,
         [generateId('pay'), sub?.user_id ?? extractUserId(data) ?? '', sub?.id ?? null, paymentId, amount, currency, status, now, now, now]);
       if (sub && status === 'succeeded') {
-        await tursoExecute(c.env, `UPDATE users SET plan = ?, updated_at = ? WHERE id = ?`, [sub.plan_key, now, sub.user_id]);
         await tursoExecute(c.env, `UPDATE subscriptions SET status = 'active', updated_at = ? WHERE id = ?`, [now, sub.id]);
+        // A paid conversion ends the Scale window and settles on the bought plan.
+        await endGrowthTrial(c.env, sub.user_id, 'converted', sub.plan_key);
+        await tursoExecute(c.env, `UPDATE users SET plan = ?, updated_at = ? WHERE id = ?`, [sub.plan_key, now, sub.user_id]);
       }
     }
 

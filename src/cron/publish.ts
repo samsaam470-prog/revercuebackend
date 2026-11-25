@@ -2,6 +2,7 @@ import { tursoQuery, tursoExecute } from '../utils/turso';
 import { createNotification } from '../services/notifications';
 import { notifyAnnouncementAudience } from '../services/announcement-notify';
 import { deliverCampaign } from '../routes/admin';
+import { expireOverdueTrials } from '../services/trials';
 import type { Bindings } from '../types';
 
 async function publishScheduledAnnouncements(env: Bindings): Promise<void> {
@@ -59,4 +60,6 @@ export async function runPublishCron(env: Bindings): Promise<void> {
   await publishScheduledAnnouncements(env).catch((e) => console.error('PUBLISH_ANNOUNCEMENTS_FAILED', e));
   await publishScheduledCampaigns(env).catch((e) => console.error('PUBLISH_CAMPAIGNS_FAILED', e));
   await sendExpiryReminders(env).catch((e) => console.error('EXPIRY_REMINDERS_FAILED', e));
+  // The 14 days of Scale included with Growth end even if a webhook is missed.
+  await expireOverdueTrials(env).catch((e) => console.error('TRIAL_EXPIRY_FAILED', e));
 }
