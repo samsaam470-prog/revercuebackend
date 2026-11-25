@@ -144,9 +144,9 @@ export const WHAT_REVERCUE_KNOWS: Record<Plan, boolean> = {
 };
 
 export const REVENUE_TRACKER: Record<Plan, boolean> = {
-  free: false,
-  starter: false,
-  growth: false,
+  free: true,
+  starter: true,
+  growth: true,
   scale: true,
   teams: true,
 };
@@ -154,7 +154,7 @@ export const REVENUE_TRACKER: Record<Plan, boolean> = {
 export const EXPENSE_ENTRY: Record<Plan, boolean> = {
   free: false,
   starter: false,
-  growth: false,
+  growth: true,
   scale: true,
   teams: true,
 };

@@ -507,17 +507,41 @@ settings.get('/revenue', async (c) => {
     return jsonError(c, 403, 'forbidden', 'Revenue tracking is not available on your plan.');
   }
   const summary = await getRevenueSummary(c.env, auth.userId);
-  const expenses = await dbQuery(c.env, `SELECT * FROM expenses WHERE user_id = ? ORDER BY date DESC LIMIT 100`, [
-    auth.userId,
-  ]);
-  return c.json({
+  // Every plan: sent, pending and confirmed amounts, and what is still pending.
+  const body: Record<string, unknown> = {
+    sent: summary.sent_total,
+    sent_count: summary.sent_count,
     earned: summary.earned_total,
-    spent: summary.spent_total,
-    profit: summary.profit,
     pending_total: summary.pending_total,
     pending_count: summary.pending_count,
-    expenses,
-  });
+    remaining_pending: summary.remaining_pending,
+  };
+  // Growth and above: what the work cost, the profit, the all-time profit, and each client's project.
+  if (EXPENSE_ENTRY[plan as keyof typeof EXPENSE_ENTRY]) {
+    const expenses = await dbQuery(c.env, `SELECT * FROM expenses WHERE user_id = ? ORDER BY date DESC LIMIT 100`, [
+      auth.userId,
+    ]);
+    const byClient = await dbQuery(
+      c.env,
+      `SELECT c.id, c.name,
+        COALESCE((SELECT SUM(i.total) FROM invoices i WHERE i.client_id = c.id AND i.user_id = c.user_id AND i.status IN ('confirmed','paid')), 0) AS earned,
+        COALESCE((SELECT SUM(e.amount) FROM expenses e WHERE e.client_id = c.id AND e.user_id = c.user_id), 0) AS spent
+       FROM clients c WHERE c.user_id = ? ORDER BY c.name`,
+      [auth.userId]
+    );
+    body.spent = summary.spent_total;
+    body.profit = summary.profit;
+    body.all_time_profit = summary.all_time_profit;
+    body.by_client = byClient.map((row: any) => ({
+      client_id: row.id,
+      name: row.name,
+      earned: Number(row.earned),
+      spent: Number(row.spent),
+      profit: Number(row.earned) - Number(row.spent),
+    }));
+    body.expenses = expenses;
+  }
+  return c.json(body);
 });
 
 settings.post('/expenses', async (c) => {
