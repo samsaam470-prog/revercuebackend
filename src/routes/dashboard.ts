@@ -24,6 +24,9 @@ dashboard.get('/summary', async (c) => {
     active_documents: Number(active?.c ?? 0),
     clients: Number(clients?.c ?? 0),
     follow_ups_due: Number(followUps?.c ?? 0),
+    revenue_total: revenue.earned_total,
+    // Deprecated alias kept for one deploy window so the previous frontend build
+    // never reads a missing field while Cloudflare Pages picks up the new one.
     revenue_this_month: revenue.earned_total,
     earned_total: revenue.earned_total,
     pending_total: revenue.pending_total,
