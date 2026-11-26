@@ -128,11 +128,16 @@ organize.post('/', async (c) => {
 
 organize.post('/visuals', async (c) => {
   const body = await c.req.json().catch(() => ({}));
-  if (!Array.isArray(body.requests)) return c.json({ error: 'invalid_payload' }, 400);
+  if (!Array.isArray(body.requests)) {
+    return c.json({ error: 'invalid_payload', message: 'requests must be an array.' }, 400);
+  }
   try {
-    const { assets, rejected } = await resolveVisuals(c.env, body.requests);
-    return c.json({ success: true, assets, rejected });
+    // Assets are keyed by the request id the caller sent, and each one keeps
+    // its type and structure. Rejections are per request, never batch-wide.
+    const { assets, rejected, warnings } = await resolveVisuals(c.env, body.requests);
+    return c.json({ success: true, assets, items: Object.values(assets), rejected, warnings });
   } catch (err: any) {
+    console.error('ORGANIZE_VISUALS_FAILED', err?.message ?? err);
     return c.json({ error: 'visuals_failed', message: err.message ?? 'Unknown' }, 500);
   }
 });

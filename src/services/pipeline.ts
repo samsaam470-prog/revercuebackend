@@ -200,18 +200,32 @@ async function fetchOpenverseImage(query: string): Promise<ImageAttribution | nu
 }
 
 // --- Iconify icons ---------------------------------------------------------
-async function fetchIcons(services: string[]): Promise<{ service: string; icon: string }[]> {
-  const results: { service: string; icon: string }[] = [];
-  for (const service of services.slice(0, 5)) {
-    const response = await safeGet(
-      `https://api.iconify.design/search?query=${encodeURIComponent(service)}&limit=1`
-    );
-    if (!response) continue;
-    const data = parseJsonBody(response.body);
-    const icon = data?.icons?.[0];
-    if (icon) results.push({ service, icon });
-  }
-  return results;
+/**
+ * Iconify search returns identifiers such as `mdi:calendar-check`. The
+ * identifier is the editable part, so it is kept, not flattened into a URL.
+ */
+async function searchIcon(query: string): Promise<string | null> {
+  const response = await safeGet(
+    `https://api.iconify.design/search?query=${encodeURIComponent(query)}&limit=4`
+  );
+  if (!response) return null;
+  const data = parseJsonBody(response.body);
+  const icons = Array.isArray(data?.icons) ? data.icons : [];
+  const match = icons.find((icon: unknown) => typeof icon === 'string' && icon.includes(':'));
+  return match ? String(match) : null;
+}
+
+/** The icon's own SVG, so it renders and stays editable without a second API call. */
+async function fetchIconSvg(identifier: string): Promise<string | null> {
+  const [prefix, name] = String(identifier).split(':');
+  if (!prefix || !name) return null;
+  const response = await safeGet(
+    `https://api.iconify.design/${encodeURIComponent(prefix)}/${encodeURIComponent(name)}.svg?height=64`
+  );
+  if (!response || !response.ok) return null;
+  const markup = response.body.trim();
+  if (!markup.startsWith('<svg') || markup.length > 20000) return null;
+  return markup;
 }
 
 // --- Layer 1 ---------------------------------------------------------------
@@ -320,6 +334,7 @@ export interface VisualAsset {
   query: string;
   url?: string;
   icon?: string;
+  svg?: string;
   license?: string | null;
   creator?: string | null;
   source?: string | null;
@@ -327,35 +342,50 @@ export interface VisualAsset {
 }
 
 // --- Layer 4 ---------------------------------------------------------------
+/**
+ * Retrieves the searchable assets: licensed photographs and icons.
+ *
+ * The result is aligned with the request array (a `null` marks a request with
+ * no asset), so a miss can never shift a later asset onto the wrong block.
+ * Charts and diagrams are built from structured data in `visuals.ts`; they are
+ * not fetched, and a text query is never turned into a chart URL.
+ */
 export async function fetchVisualAssets(
   env: Bindings,
   requests: { type: string; query: string }[]
-): Promise<VisualAsset[]> {
-  const out: VisualAsset[] = [];
+): Promise<(VisualAsset | null)[]> {
+  const out: (VisualAsset | null)[] = [];
   for (const request of requests.slice(0, 12)) {
-    if (request.type === 'image') {
-      const image = await fetchOpenverseImage(request.query);
-      if (image) {
-        out.push({
-          type: 'image',
-          query: request.query,
-          url: image.url,
-          license: image.license,
-          creator: image.creator,
-          source: image.source,
-          attribution: [image.creator, image.license, image.source].filter(Boolean).join(' · ') || null,
-        });
+    try {
+      if (request.type === 'image') {
+        const image = await fetchOpenverseImage(request.query);
+        out.push(
+          image
+            ? {
+                type: 'image',
+                query: request.query,
+                url: image.url,
+                license: image.license,
+                creator: image.creator,
+                source: image.source,
+                attribution: [image.creator, image.license, image.source].filter(Boolean).join(' · ') || null,
+              }
+            : null
+        );
+      } else if (request.type === 'icon') {
+        const identifier = await searchIcon(request.query);
+        const svg = identifier ? await fetchIconSvg(identifier) : null;
+        out.push(
+          identifier
+            ? { type: 'icon', query: request.query, icon: identifier, svg: svg ?? undefined, source: 'Iconify' }
+            : null
+        );
+      } else {
+        out.push(null);
       }
-    } else if (request.type === 'icon') {
-      const icons = await fetchIcons([request.query]);
-      if (icons[0]) out.push({ type: 'icon', query: request.query, icon: icons[0].icon, source: 'Iconify' });
-    } else if (request.type === 'chart') {
-      out.push({
-        type: 'chart',
-        query: request.query,
-        url: `https://quickchart.io/chart?c=${encodeURIComponent(request.query)}`,
-        source: 'QuickChart',
-      });
+    } catch (error) {
+      console.error('VISUAL_FETCH_FAILED', request.type, error);
+      out.push(null);
     }
   }
   return out;

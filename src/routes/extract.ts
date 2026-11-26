@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
-import { runLayer1, fetchVisualAssets } from '../services/pipeline';
+import { runLayer1 } from '../services/pipeline';
+import { resolveVisuals } from '../services/visuals';
 import { userAuthMiddleware } from '../middleware/user-auth';
 import { checkRateLimit } from '../services/rate-limit';
 import type { Bindings } from '../types';
@@ -45,10 +46,15 @@ extract.post('/visuals', async (c) => {
   if (!rl.allowed) return c.json({ error: 'rate_limited', retry_after: rl.retryAfter }, 429);
 
   const body = await c.req.json().catch(() => ({}));
-  if (!Array.isArray(body.requests)) return c.json({ error: 'invalid_payload' }, 400);
+  if (!Array.isArray(body.requests)) {
+    return c.json({ error: 'invalid_payload', message: 'requests must be an array.' }, 400);
+  }
   try {
-    const assets = await fetchVisualAssets(c.env, body.requests);
-    return c.json({ success: true, assets });
+    // Same resolution contract as /api/organize/visuals: typed assets keyed by
+    // request id. `assets` is the object; `items` keeps the older array shape
+    // for any caller that still reads a list.
+    const { assets, rejected, warnings } = await resolveVisuals(c.env, body.requests);
+    return c.json({ success: true, assets, items: Object.values(assets), rejected, warnings });
   } catch (err: any) {
     console.error('VISUALS_FAILED', err.message);
     return c.json({ error: 'visuals_failed', message: err.message ?? 'Unknown error' }, 500);
