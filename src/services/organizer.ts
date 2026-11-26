@@ -27,6 +27,8 @@ export interface OrganizerPackage {
   description?: string;
 }
 
+import { draftSectionCopy } from './section-copy';
+
 export interface OrganizerInput {
   client_name?: string;
   business_name?: string;
@@ -46,6 +48,9 @@ export interface OrganizerInput {
   packages?: OrganizerPackage[];
   /** The contract's own scope clause. It is first-hand wording, not research. */
   scope?: string;
+  /** Which library the template came from, so clause copy is framed correctly. */
+  document_type?: 'proposal' | 'contract';
+  template_name?: string;
 }
 
 const ALIASES: Record<string, string> = {
@@ -60,6 +65,14 @@ const ALIASES: Record<string, string> = {
   how_it_works: 'process',
   approach: 'process',
   schedule: 'timeline',
+  hero: 'hero_image',
+  heroimage: 'hero_image',
+  price: 'pricing',
+  fees: 'payment_terms',
+  fee: 'payment_terms',
+  payment: 'payment_terms',
+  nextstep: 'next_step',
+  scope_of_work: 'scope',
 };
 
 const STOPWORDS = new Set([
@@ -269,13 +282,40 @@ export function organizeSections(input: OrganizerInput): Record<string, string> 
     } else if (key === 'timeline') {
       if (timeline) copy = `The timeline provided for this project is ${timeline.replace(/[.]+$/, '')}. Confirm dates and milestones before sharing.`;
     } else if (key === 'next_step') {
-      copy = cta ? sentences(cta, 1) : '';
+      copy = cta
+        ? sentences(cta, 1)
+        : `Confirm the next step with ${client} and record the approval in writing.`;
     } else if (key === 'pricing') {
       // The document's own package data carries pricing; never infer an amount.
       copy = '';
     } else {
-      // Client research must not be repurposed as a legal or commercial clause.
-      copy = '';
+      // Template-specific sections: drafted from the brief, with anything that
+      // needs a commercial or legal decision left for the author to complete.
+      // Client research is never repurposed as a clause.
+      copy = draftSectionCopy(key, {
+        client,
+        businessName,
+        businessWebsite,
+        businessDescription,
+        industry,
+        service,
+        problem,
+        audience,
+        timeline,
+        cta,
+        scopeClause,
+        deliverables,
+        packagesNote: (input.packages ?? [])
+          .map((item) => {
+            const name = clean(item.name ?? '');
+            if (!name) return '';
+            return item.price === undefined ? name : `${name} (${item.price})`;
+          })
+          .filter(Boolean)
+          .join(', '),
+        documentType: input.document_type === 'contract' ? 'contract' : 'proposal',
+        templateName: input.template_name,
+      });
     }
 
     const finalCopy = uniqueSentences(copy).trim();
