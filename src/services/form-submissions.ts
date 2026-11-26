@@ -3,7 +3,7 @@ import { tursoQuery } from '../utils/turso';
 import { generateId } from '../utils/ids';
 import { generatePrompt } from './prompt-creator';
 import { runLayer1 } from './pipeline';
-import { fetchVisualAssets } from './pipeline';
+import { fetchVisualAssets } from './visual-assets';
 import { createNotification } from './notifications';
 import { resolveClientId } from './clients';
 import {

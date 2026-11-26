@@ -35,8 +35,117 @@ function formatMoney(amount: unknown, currency: unknown): string {
   return `${Number.isFinite(value) ? value.toFixed(2) : '0.00'} ${String(currency ?? 'USD')}`;
 }
 
+/**
+ * The document's own blocks are the document. The PDF used to be rebuilt from
+ * a handful of content fields, so nothing the author saw on the canvas —
+ * edited paragraphs, charts, diagrams, icons — reached the export.
+ */
+export function blockSections(content: any): { heading: string; body: string }[] {
+  const blocks = Array.isArray(content?.blocks)
+    ? content.blocks.filter((block: any) => block && typeof block === 'object' && typeof block.type === 'string')
+    : [];
+  if (!blocks.length) return [];
+
+  const out: { heading: string; body: string }[] = [];
+  let heading = '';
+  let lines: string[] = [];
+
+  const flush = () => {
+    const body = lines.filter(Boolean).join('\n').trim();
+    if (heading || body) out.push({ heading: heading || 'Overview', body });
+    heading = '';
+    lines = [];
+  };
+
+  for (const block of blocks) {
+    const text = typeof block.text === 'string' ? block.text.trim() : '';
+    switch (block.type) {
+      case 'heading':
+        flush();
+        heading = text || 'Section';
+        break;
+      case 'paragraph':
+      case 'quote':
+      case 'button':
+      case 'card':
+      case 'next_step':
+        if (text) lines.push(block.type === 'quote' ? `"${text}"` : text);
+        break;
+      case 'list':
+        for (const item of Array.isArray(block.items) ? block.items : []) {
+          if (item?.label) lines.push(`- ${String(item.label)}`);
+        }
+        break;
+      case 'timeline':
+        for (const item of Array.isArray(block.items) ? block.items : []) {
+          if (item?.label) lines.push(`- ${String(item.label)}${item.value ? ` (${item.value})` : ''}`);
+        }
+        break;
+      case 'pricing_table':
+      case 'packages':
+        for (const item of Array.isArray(block.items) ? block.items : []) {
+          if (!item?.label) continue;
+          const price = Number(item.price ?? 0);
+          lines.push(`${String(item.label)}${Number.isFinite(price) ? `: ${price.toFixed(2)}` : ''}`);
+        }
+        break;
+      case 'faq':
+        for (const faq of Array.isArray(block.faqs) ? block.faqs : []) {
+          const question = String(faq?.question ?? '').trim();
+          const answer = String(faq?.answer ?? '').trim();
+          if (question) lines.push(`Q: ${question}`);
+          if (answer) lines.push(`A: ${answer}`);
+        }
+        break;
+      case 'chart':
+      case 'graph': {
+        const chart = block.chart ?? {};
+        const labels = Array.isArray(chart.labels) ? chart.labels : [];
+        const values = Array.isArray(chart.values) ? chart.values : [];
+        if (text || chart.title) lines.push(String(chart.title || text));
+        labels.forEach((label: unknown, index: number) => {
+          const value = Number(values[index]);
+          if (Number.isFinite(value)) lines.push(`${String(label)}: ${value}${chart.unit ? ` ${chart.unit}` : ''}`);
+        });
+        if (block.caption) lines.push(String(block.caption));
+        break;
+      }
+      case 'diagram': {
+        const steps = Array.isArray(block.diagram?.steps)
+          ? block.diagram.steps.map((step: unknown) => String(step).trim()).filter(Boolean)
+          : [];
+        if (text) lines.push(text);
+        if (steps.length) lines.push(steps.join(' -> '));
+        break;
+      }
+      case 'image':
+      case 'icon':
+      case 'svg': {
+        const label = String(block.alt || block.text || '').trim();
+        const caption = String(block.caption || '').trim();
+        if (label) lines.push(`[${block.type === 'image' ? 'Image' : block.type === 'icon' ? 'Icon' : 'Illustration'}] ${label}`);
+        if (caption) lines.push(caption);
+        break;
+      }
+      case 'two_column':
+      case 'three_column':
+        for (const column of Array.isArray(block.columns) ? block.columns : []) {
+          if (Array.isArray(column)) lines.push(column.map((line: unknown) => String(line)).join(' '));
+        }
+        break;
+      default:
+        if (text) lines.push(text);
+        break;
+    }
+  }
+  flush();
+  return out.filter((section) => section.heading || section.body);
+}
+
 export function proposalSections(row: any): { heading: string; body: string }[] {
   const content = parseJson(row.content);
+  const fromBlocks = blockSections(content);
+  if (fromBlocks.length) return fromBlocks;
   const out: { heading: string; body: string }[] = [];
   if (content.problem) out.push({ heading: 'The problem', body: String(content.problem) });
   if (content.target_audience) out.push({ heading: 'Audience', body: String(content.target_audience) });
@@ -68,6 +177,8 @@ export function proposalSections(row: any): { heading: string; body: string }[] 
 
 export function contractSections(row: any): { heading: string; body: string }[] {
   const content = parseJson(row.content);
+  const fromBlocks = blockSections(content);
+  if (fromBlocks.length) return fromBlocks;
   const out: { heading: string; body: string }[] = [];
   const ordered: Array<[string, string]> = [
     ['Scope of work', 'scope'],

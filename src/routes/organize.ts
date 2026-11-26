@@ -128,12 +128,22 @@ organize.post('/', async (c) => {
 
 organize.post('/visuals', async (c) => {
   const body = await c.req.json().catch(() => ({}));
-  if (!Array.isArray(body.requests)) return c.json({ error: 'invalid_payload' }, 400);
+  if (!Array.isArray(body.requests)) {
+    return c.json({ error: 'invalid_payload', message: 'requests must be an array.' }, 400);
+  }
+  if (body.requests.length > 8) {
+    return c.json({ error: 'invalid_payload', message: 'At most 8 visual requests per document.' }, 400);
+  }
   try {
-    const { assets, rejected } = await resolveVisuals(c.env, body.requests);
-    return c.json({ success: true, assets, rejected });
+    // Each request resolves on its own, so one unavailable source never
+    // prevents the rest of the document's visuals (or the document) from
+    // being produced. `items` keeps the request identity that `assets` alone
+    // could not: two visuals in one section used to overwrite each other.
+    const { assets, items, rejected } = await resolveVisuals(body.requests);
+    return c.json({ success: true, assets, items, rejected });
   } catch (err: any) {
-    return c.json({ error: 'visuals_failed', message: err.message ?? 'Unknown' }, 500);
+    console.error('VISUALS_FAILED', err?.message ?? err);
+    return c.json({ error: 'visuals_failed', message: 'Visual assets could not be resolved.' }, 500);
   }
 });
 

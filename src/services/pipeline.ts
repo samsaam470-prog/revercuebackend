@@ -175,7 +175,7 @@ async function fetchNominatim(location: string): Promise<string | null> {
 }
 
 // --- Openverse images (with attribution + licence) -------------------------
-async function fetchOpenverseImage(query: string): Promise<ImageAttribution | null> {
+export async function fetchOpenverseImage(query: string): Promise<ImageAttribution | null> {
   const response = await safeGet(
     `https://api.openverse.org/v1/images/?q=${encodeURIComponent(query)}&page_size=10&license_type=all-cc`
   );
@@ -200,18 +200,20 @@ async function fetchOpenverseImage(query: string): Promise<ImageAttribution | nu
 }
 
 // --- Iconify icons ---------------------------------------------------------
-async function fetchIcons(services: string[]): Promise<{ service: string; icon: string }[]> {
-  const results: { service: string; icon: string }[] = [];
-  for (const service of services.slice(0, 5)) {
-    const response = await safeGet(
-      `https://api.iconify.design/search?query=${encodeURIComponent(service)}&limit=1`
-    );
-    if (!response) continue;
-    const data = parseJsonBody(response.body);
-    const icon = data?.icons?.[0];
-    if (icon) results.push({ service, icon });
-  }
-  return results;
+/**
+ * Candidate icon ids for a query. The caller decides relevance: taking the
+ * first search hit blindly attached unrelated icons (a "web design" request
+ * could return a weather icon).
+ */
+export async function searchIcons(query: string): Promise<string[]> {
+  const response = await safeGet(
+    `https://api.iconify.design/search?query=${encodeURIComponent(query)}&limit=12`
+  );
+  if (!response) return [];
+  const data = parseJsonBody(response.body);
+  const icons = data?.icons;
+  if (!Array.isArray(icons)) return [];
+  return icons.filter((icon: unknown): icon is string => typeof icon === 'string' && /^[a-z0-9-]+:[a-z0-9-]+$/i.test(icon));
 }
 
 // --- Layer 1 ---------------------------------------------------------------
@@ -313,50 +315,4 @@ export async function runLayer1(env: Bindings, input: ExtractInput): Promise<Ext
     author_description: userMeta.description || undefined,
     author_website: input.user_website || undefined,
   };
-}
-
-export interface VisualAsset {
-  type: string;
-  query: string;
-  url?: string;
-  icon?: string;
-  license?: string | null;
-  creator?: string | null;
-  source?: string | null;
-  attribution?: string | null;
-}
-
-// --- Layer 4 ---------------------------------------------------------------
-export async function fetchVisualAssets(
-  env: Bindings,
-  requests: { type: string; query: string }[]
-): Promise<VisualAsset[]> {
-  const out: VisualAsset[] = [];
-  for (const request of requests.slice(0, 12)) {
-    if (request.type === 'image') {
-      const image = await fetchOpenverseImage(request.query);
-      if (image) {
-        out.push({
-          type: 'image',
-          query: request.query,
-          url: image.url,
-          license: image.license,
-          creator: image.creator,
-          source: image.source,
-          attribution: [image.creator, image.license, image.source].filter(Boolean).join(' · ') || null,
-        });
-      }
-    } else if (request.type === 'icon') {
-      const icons = await fetchIcons([request.query]);
-      if (icons[0]) out.push({ type: 'icon', query: request.query, icon: icons[0].icon, source: 'Iconify' });
-    } else if (request.type === 'chart') {
-      out.push({
-        type: 'chart',
-        query: request.query,
-        url: `https://quickchart.io/chart?c=${encodeURIComponent(request.query)}`,
-        source: 'QuickChart',
-      });
-    }
-  }
-  return out;
 }

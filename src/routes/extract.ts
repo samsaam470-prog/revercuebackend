@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
-import { runLayer1, fetchVisualAssets } from '../services/pipeline';
+import { runLayer1 } from '../services/pipeline';
+import { fetchVisualAssets } from '../services/visual-assets';
 import { userAuthMiddleware } from '../middleware/user-auth';
 import { checkRateLimit } from '../services/rate-limit';
 import type { Bindings } from '../types';
