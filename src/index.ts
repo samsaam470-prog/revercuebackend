@@ -23,6 +23,7 @@ import extractRouter from './routes/extract';
 import organizeRouter from './routes/organize';
 import summaryRouter from './routes/summary';
 import marketingRouter from './routes/marketing';
+import demoRouter from './routes/demo';
 import { runHourly } from './cron/summary';
 import { runAuthActionSync } from './services/authaction-sync';
 import { runPublishCron } from './cron/publish';
@@ -32,7 +33,7 @@ const app = new Hono<{ Bindings: Bindings }>();
 
 app.use('*', async (c, next) => {
   const configured = (c.env.FRONTEND_ORIGIN ?? '').trim();
-  const extra = (c.env.ALLOWED_ORIGINS ?? '')
+  const extra = `${c.env.ALLOWED_ORIGINS ?? ''},${c.env.DEMO_ALLOWED_ORIGINS ?? ''}`
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
@@ -97,6 +98,7 @@ app.route('/api/announcements', announcementsRouter);
 app.route('/api/templates', templatesRouter);
 app.route('/api/admin', adminRouter);
 app.route('/api/admin', adminActionsRouter);
+app.route('/api/demo', demoRouter);
 app.route('/api/extract', extractRouter);
 app.route('/api/organize', organizeRouter);
 app.route('/api/summary', summaryRouter);
