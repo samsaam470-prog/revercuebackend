@@ -508,7 +508,7 @@ export async function generateDemoProposal(env: Bindings, brief: DemoBrief): Pro
     {
       id: blockId('meta'),
       type: 'paragraph',
-      text: `Prepared for ${brief.clientName}${brief.businessName ? ` by ${brief.businessName}` : ''}.`,
+      text: `Prepared for ${brief.clientName}${brief.businessName ? ` by ${brief.businessName.replace(/[.,;:]$/, '')}` : ''}.`,
     },
   ];
 
