@@ -326,25 +326,35 @@ admin.delete('/users/:id', async (c) => {
   return c.json({ success: true });
 });
 
-function simpleList(table: string, orderBy = 'created_at DESC') {
+/**
+ * A paginated list over one table.
+ *
+ * The admin UI offers a status filter on most queues, so `?status=` must be
+ * applied here. Values are allowlisted: an unknown status is ignored rather
+ * than interpolated into SQL.
+ */
+function simpleList(table: string, orderBy = 'created_at DESC', statuses: readonly string[] = []) {
   return async (c: any) => {
     const pagination = parsePagination(c, ADMIN_LIST_LIMIT);
-    const total = await tursoQuery(c.env, `SELECT COUNT(*) as c FROM ${table}`);
+    const status = c.req.query('status');
+    const filter = status && statuses.includes(status) ? 'WHERE status = ?' : '';
+    const args = filter ? [status] : [];
+    const total = await tursoQuery(c.env, `SELECT COUNT(*) as c FROM ${table} ${filter}`, args);
     const rows = await tursoQuery(
       c.env,
-      `SELECT * FROM ${table} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
-      [pagination.limit, pagination.offset]
+      `SELECT * FROM ${table} ${filter} ORDER BY ${orderBy} LIMIT ? OFFSET ?`,
+      [...args, pagination.limit, pagination.offset]
     );
     return c.json(paginated(rows.rows, Number(total.rows[0]?.c ?? 0), pagination));
   };
 }
 
-admin.get('/waitlist', simpleList('waitlist'));
-admin.get('/beta-testers', simpleList('beta_testers'));
-admin.get('/contact-messages', simpleList('contact_messages'));
-admin.get('/website-help', simpleList('website_help_requests'));
-admin.get('/payments', simpleList('payments'));
-admin.get('/feedback', simpleList('feedback'));
+admin.get('/waitlist', simpleList('waitlist', 'created_at DESC', ['pending', 'invited', 'paid']));
+admin.get('/beta-testers', simpleList('beta_testers', 'created_at DESC', ['new', 'contacted', 'active', 'rejected']));
+admin.get('/contact-messages', simpleList('contact_messages', 'created_at DESC', ['new', 'read', 'replied', 'closed']));
+admin.get('/website-help', simpleList('website_help_requests', 'created_at DESC', ['new', 'in_progress', 'done', 'closed']));
+admin.get('/payments', simpleList('payments', 'created_at DESC', ['paid', 'pending', 'failed', 'refunded']));
+admin.get('/feedback', simpleList('feedback', 'created_at DESC', ['new', 'reviewed', 'closed']));
 admin.get('/notes', simpleList('admin_notes'));
 
 admin.patch('/waitlist/:id/status', async (c) => {
