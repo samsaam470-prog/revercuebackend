@@ -87,6 +87,12 @@ organize.post('/', async (c) => {
       cta: brief.cta ?? body.cta,
       scope: brief.scope ?? body.scope,
       packages,
+      document_type:
+        body.document_type === 'contract' || body.template?.type === 'contract'
+          ? 'contract'
+          : 'proposal',
+      template_name:
+        typeof body.template?.name === 'string' ? body.template.name.slice(0, 200) : undefined,
     });
 
     // Keep the organised copy on the result as well, so a caller that only
@@ -119,6 +125,17 @@ organize.post('/', async (c) => {
         background_notes: backgroundNotes.length,
         warnings,
         missing_information: missingInformation,
+        template:
+          body.template && typeof body.template === 'object'
+            ? {
+                id: String(body.template.id ?? '').slice(0, 160) || null,
+                name: String(body.template.name ?? '').slice(0, 200) || null,
+                type:
+                  body.template.type === 'contract' || body.document_type === 'contract'
+                    ? 'contract'
+                    : 'proposal',
+              }
+            : null,
       },
     });
   } catch (err: any) {
