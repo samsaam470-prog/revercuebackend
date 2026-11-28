@@ -28,6 +28,8 @@ import { runHourly } from './cron/summary';
 import { runAuthActionSync } from './services/authaction-sync';
 import { runPublishCron } from './cron/publish';
 import { newReferenceCode } from './utils/http';
+import collaborationRouter from './routes/collaboration';
+import { purgeExpiredChat } from './services/collaboration-chat';
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -102,6 +104,8 @@ app.route('/api/demo', demoRouter);
 app.route('/api/extract', extractRouter);
 app.route('/api/organize', organizeRouter);
 app.route('/api/summary', summaryRouter);
+// Shareable Builder + Offline Builder (Scale only; service decides authority).
+app.route('/api/collaboration', collaborationRouter);
 // Public marketing endpoints: /api/newsletter, /api/contact, /api/waitlist, /api/beta
 app.route('/api', marketingRouter);
 
@@ -146,5 +150,7 @@ export default {
     ctx.waitUntil(runHourly(env));
     ctx.waitUntil(runAuthActionSync(env, 'cron').catch(() => undefined));
     ctx.waitUntil(runPublishCron(env).catch(() => undefined));
+    // Temporary collaboration chat must not outlive its session.
+    ctx.waitUntil(purgeExpiredChat(env).catch(() => undefined));
   },
 };

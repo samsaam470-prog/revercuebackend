@@ -31,6 +31,7 @@ import { getTrackingSummary } from '../services/tracking';
 import { activeDocumentLimitBody, checkActiveDocumentLimit } from '../services/plan-limits';
 import { SigningError } from '../services/contract-state';
 import type { Bindings } from '../types';
+import { assertOwnerMayEdit } from '../services/document-editing-authority';
 
 const contracts = new Hono<{ Bindings: Bindings }>();
 contracts.use('*', userAuthMiddleware);
@@ -184,6 +185,8 @@ contracts.get('/:id', async (c) => {
 
 contracts.patch('/:id', async (c) => {
   const auth = getAuth(c);
+  const lock = await assertOwnerMayEdit(c.env, 'contract', c.req.param('id'));
+  if (!lock.ok) return jsonError(c, 409, lock.code, lock.message);
   const body = await c.req.json().catch(() => ({}));
   let contract: any;
   try {

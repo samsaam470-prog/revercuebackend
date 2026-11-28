@@ -13,6 +13,7 @@ import { resolveClientId } from '../services/clients';
 import { buildDocumentPdf } from '../services/pdf';
 import { pdfResponse } from '../services/pdf-binary';
 import type { Bindings } from '../types';
+import { assertOwnerMayEdit } from '../services/document-editing-authority';
 
 const invoices = new Hono<{ Bindings: Bindings }>();
 
@@ -213,6 +214,8 @@ invoices.get('/:id', async (c) => {
 
 invoices.patch('/:id', async (c) => {
   const auth = getAuth(c);
+  const lock = await assertOwnerMayEdit(c.env, 'invoice', c.req.param('id'));
+  if (!lock.ok) return jsonError(c, 409, lock.code, lock.message);
   const body = await c.req.json().catch(() => ({}));
   const row = await dbFirst<any>(c.env, `SELECT id, status, line_items, tax FROM invoices WHERE id = ? AND user_id = ?`, [
     c.req.param('id'),

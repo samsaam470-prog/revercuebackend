@@ -14,6 +14,7 @@ import { pdfResponse } from '../services/pdf-binary';
 import { ARCHIVE_COUNT_LIMIT, ARCHIVE_RETENTION_DAYS, DRAFT_RETENTION_DAYS, PASSWORD_PROTECTED_LIMIT } from '../config/constants';
 import { activeDocumentLimitBody, checkActiveDocumentLimit } from '../services/plan-limits';
 import type { Bindings } from '../types';
+import { assertOwnerMayEdit } from '../services/document-editing-authority';
 
 const proposals = new Hono<{ Bindings: Bindings }>();
 proposals.use('*', userAuthMiddleware);
@@ -221,6 +222,8 @@ proposals.get('/:id', async (c) => {
 
 proposals.patch('/:id', async (c) => {
   const auth = getAuth(c);
+  const lock = await assertOwnerMayEdit(c.env, 'proposal', c.req.param('id'));
+  if (!lock.ok) return jsonError(c, 409, lock.code, lock.message);
   const body = await c.req.json().catch(() => ({}));
   const row = await dbFirst<any>(c.env, `SELECT id, content FROM proposals WHERE id = ? AND user_id = ?`, [
     c.req.param('id'),
@@ -244,6 +247,8 @@ proposals.patch('/:id', async (c) => {
 
 proposals.post('/:id/autosave', async (c) => {
   const auth = getAuth(c);
+  const lock = await assertOwnerMayEdit(c.env, 'proposal', c.req.param('id'));
+  if (!lock.ok) return jsonError(c, 409, lock.code, lock.message);
   const b = await c.req.json().catch(() => ({}));
   const row = await dbFirst<any>(c.env, `SELECT content FROM proposals WHERE id = ? AND user_id = ?`, [
     c.req.param('id'),

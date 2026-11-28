@@ -23,6 +23,7 @@ import {
 import { buildDocumentPdf } from '../services/pdf';
 import { pdfResponse } from '../services/pdf-binary';
 import type { Bindings } from '../types';
+import { assertOwnerMayEdit } from '../services/document-editing-authority';
 
 const forms = new Hono<{ Bindings: Bindings }>();
 forms.use('*', userAuthMiddleware);
@@ -209,6 +210,8 @@ forms.get('/:id', async (c) => {
 
 forms.patch('/:id', async (c) => {
   const auth = getAuth(c);
+  const lock = await assertOwnerMayEdit(c.env, 'form', c.req.param('id'));
+  if (!lock.ok) return jsonError(c, 409, lock.code, lock.message);
   const body = await c.req.json().catch(() => ({}));
   const row = await dbFirst<any>(c.env, `SELECT * FROM forms WHERE id = ? AND user_id = ?`, [
     c.req.param('id'),
