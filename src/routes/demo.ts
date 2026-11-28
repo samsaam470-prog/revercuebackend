@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { Bindings } from '../types';
 import { checkRateLimit } from '../services/rate-limit';
-import { DemoAiError } from '../services/demo-ai';
+import { DemoAiError, demoProvider, workersAiModel } from '../services/demo-ai';
 import {
   generateDemoProposal,
   generateDemoVisual,
@@ -126,12 +126,16 @@ async function readJson(env: Bindings, request: Request): Promise<unknown> {
 }
 
 demo.get('/health', (c) => {
+  const provider = demoProvider(c.env);
   return c.json({
     ok: true,
-    configured: Boolean((c.env.OPENROUTER_API_KEY ?? '').trim()),
-    provider: 'nararouter',
-    endpoint: (c.env.BYNARA_API_ENDPOINT ?? '').trim() || 'https://router.bynara.id/v1',
-    model: (c.env.DEMO_AI_MODEL ?? '').trim() || 'deepseek-v4-flash',
+    configured: provider !== 'none',
+    provider,
+    endpoint:
+      provider === 'nararouter'
+        ? (c.env.BYNARA_API_ENDPOINT ?? '').trim() || 'https://router.bynara.id/v1'
+        : 'workers-ai',
+    model: provider === 'nararouter' ? (c.env.DEMO_AI_MODEL ?? '').trim() || 'deepseek-v4-flash' : workersAiModel(c.env),
     limits: {
       generations_per_hour: Number(c.env.DEMO_GENERATIONS_PER_HOUR ?? GENERATIONS_PER_HOUR) || GENERATIONS_PER_HOUR,
       edits_per_hour: Number(c.env.DEMO_EDITS_PER_HOUR ?? EDITS_PER_HOUR) || EDITS_PER_HOUR,

@@ -116,6 +116,10 @@ export interface Bindings {
   BYNARA_API_ENDPOINT?: string;
   /** Model used by the public demo only. Defaults to deepseek-v4-flash. */
   DEMO_AI_MODEL?: string;
+  /** Workers AI model used only when no NaraRouter key is configured. */
+  DEMO_WORKERS_AI_MODEL?: string;
+  /** Workers AI binding. The demo's keyless provider. */
+  AI?: Ai;
   /** Comma separated additional CORS origins for the public demo. */
   DEMO_ALLOWED_ORIGINS?: string;
   DEMO_GENERATIONS_PER_HOUR?: string;

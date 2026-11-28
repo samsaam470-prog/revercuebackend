@@ -1,15 +1,18 @@
 import type { Bindings } from '../types';
 
 /**
- * NaraRouter client for the public proposal demo.
+ * AI client for the public proposal demo.
  *
- * NaraRouter is the ONLY provider used here. There is no fallback provider and
- * no model switching: a quota, rate-limit or availability problem is returned
- * to the caller as a typed error so the demo can ask the visitor to retry.
+ * NaraRouter is the primary provider: the key lives in the Worker secret
+ * `OPENROUTER_API_KEY` (the name is historical; the value is a NaraRouter key)
+ * and the base URL in `BYNARA_API_ENDPOINT`. Neither is ever sent to the browser.
  *
- * The key lives in the existing Worker secret `OPENROUTER_API_KEY` (the name is
- * historical; the value is a NaraRouter key) and the base URL in
- * `BYNARA_API_ENDPOINT`. Neither is ever sent to the browser.
+ * When that secret is absent the demo falls back to this account's own
+ * Cloudflare Workers AI binding (`AI`), which needs no external key at all. The
+ * fallback exists so the public Space keeps working between NaraRouter keys;
+ * setting the secret switches every request back to NaraRouter with no code
+ * change. A quota, rate-limit or availability problem is returned to the caller
+ * as a typed error so the demo can ask the visitor to retry.
  */
 
 export type DemoAiErrorCode =
@@ -48,6 +51,78 @@ export function demoModel(env: Bindings): string {
   return (env.DEMO_AI_MODEL ?? '').trim() || DEFAULT_DEMO_MODEL;
 }
 
+/**
+ * Default Workers AI model for the keyless fallback.
+ * `llama-4-scout-17b-16e-instruct` is the model that returns the long,
+ * strictly-shaped JSON the demo's staged pipeline asks for while still
+ * answering in about 20 seconds. The 8B tier truncates the section draft, the
+ * 70B tier drops sections, and GLM 4.7 Flash takes about a minute.
+ */
+export const DEFAULT_WORKERS_AI_MODEL = '@cf/meta/llama-4-scout-17b-16e-instruct';
+
+/**
+ * Tried in order when the configured model is retired. Cloudflare retires
+ * Workers AI models regularly, and a dead name must not take the public demo
+ * down with it.
+ */
+const WORKERS_AI_FALLBACK_MODELS = [
+  '@cf/meta/llama-4-scout-17b-16e-instruct',
+  '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+  '@cf/meta/llama-3.1-8b-instruct-fp8',
+];
+
+/** Last model this isolate saw work, so a dead name costs one request, not many. */
+let workingWorkersAiModel = '';
+
+export function workersAiModel(env: Bindings): string {
+  return workingWorkersAiModel || (env.DEMO_WORKERS_AI_MODEL ?? '').trim() || DEFAULT_WORKERS_AI_MODEL;
+}
+
+function workersAiCandidates(env: Bindings): string[] {
+  const configured = (env.DEMO_WORKERS_AI_MODEL ?? '').trim();
+  const list = [
+    ...(configured ? [configured] : []),
+    ...(workingWorkersAiModel ? [workingWorkersAiModel] : []),
+    ...WORKERS_AI_FALLBACK_MODELS,
+  ];
+  return [...new Set(list)];
+}
+
+/**
+ * Workers AI text generation returns `{ response }` for the Llama family and
+ * `{ choices: [{ message: { content } }] }` for the OpenAI-compatible models,
+ * so read both rather than assuming one shape.
+ */
+function workersAiText(result: unknown): string {
+  if (typeof result === 'string') return result.trim();
+  if (!result || typeof result !== 'object') return '';
+  const record = result as Record<string, unknown>;
+  if (typeof record.response === 'string' && record.response.trim()) return record.response.trim();
+  const choices = record.choices;
+  if (Array.isArray(choices) && choices.length) {
+    const first = choices[0] as Record<string, unknown> | undefined;
+    const message = (first?.message ?? {}) as Record<string, unknown>;
+    if (typeof message.content === 'string' && message.content.trim()) return message.content.trim();
+  }
+  const nested = record.result as Record<string, unknown> | undefined;
+  if (nested) {
+    if (typeof nested.response === 'string' && nested.response.trim()) return nested.response.trim();
+  }
+  return '';
+}
+
+/** A retired or unknown model name: worth trying the next candidate. */
+function isModelProblem(message: string): boolean {
+  return /deprecat|not found|does not exist|no such model|unknown model|not supported/i.test(message);
+}
+
+/** Which provider a request will use. Reported by `/api/demo/health`. */
+export function demoProvider(env: Bindings): 'nararouter' | 'workers-ai' | 'none' {
+  if ((env.OPENROUTER_API_KEY ?? '').trim()) return 'nararouter';
+  if (env.AI) return 'workers-ai';
+  return 'none';
+}
+
 export function demoEndpoint(env: Bindings): string {
   return ((env.BYNARA_API_ENDPOINT ?? '').trim() || 'https://router.bynara.id/v1').replace(/\/+$/, '');
 }
@@ -74,6 +149,7 @@ export async function demoChat(
 ): Promise<string> {
   const apiKey = (env.OPENROUTER_API_KEY ?? '').trim();
   if (!apiKey) {
+    if (env.AI) return workersAiChat(env, messages, options);
     throw new DemoAiError(
       'ai_not_configured',
       'The proposal service is not configured yet. Please try again later.',
@@ -125,6 +201,55 @@ export async function demoChat(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * One chat completion on this account's Workers AI allowance. Used only when no
+ * NaraRouter key is configured, so the public demo never depends on a secret to
+ * be useful.
+ */
+async function workersAiChat(
+  env: Bindings,
+  messages: ChatMessage[],
+  options: ChatOptions
+): Promise<string> {
+  const ai = env.AI;
+  if (!ai) {
+    throw new DemoAiError(
+      'ai_not_configured',
+      'The proposal service is not configured yet. Please try again later.',
+      503
+    );
+  }
+
+  for (const candidate of workersAiCandidates(env)) {
+    try {
+      const result = (await (ai.run as unknown as (
+        name: string,
+        input: Record<string, unknown>
+      ) => Promise<{ response?: unknown }>)(candidate, {
+        messages,
+        max_tokens: options.maxTokens ?? 900,
+        temperature: options.temperature ?? 0.4,
+      })) as { response?: unknown } | null;
+
+      const content = workersAiText(result);
+      if (!content) {
+        console.error('DEMO_WORKERS_AI_EMPTY', candidate, JSON.stringify(result)?.slice(0, 300) ?? 'null');
+        continue;
+      }
+      workingWorkersAiModel = candidate;
+      return content;
+    } catch (error) {
+      if (error instanceof DemoAiError) throw error;
+      const message = (error as Error)?.message ?? String(error);
+      console.error('DEMO_WORKERS_AI_FAILED', candidate, message);
+      if (isModelProblem(message)) continue;
+      break;
+    }
+  }
+
+  throw new DemoAiError('ai_unavailable', 'The AI service is temporarily unavailable. Please retry.', 502);
 }
 
 async function classify(response: Response): Promise<DemoAiError> {

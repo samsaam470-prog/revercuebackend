@@ -7,6 +7,12 @@ binding = "DB"
 database_name = "revercue-db"
 database_id = "60b39623-1fdc-4722-967d-ed36a82623b9"
 
+# Public demo keyless provider: used only while no NaraRouter secret is set, so
+# the Hugging Face Space keeps working. NaraRouter takes over the moment
+# OPENROUTER_API_KEY exists.
+[ai]
+binding = "AI"
+
 [observability]
 enabled = true
 
@@ -63,6 +69,9 @@ WHOP_GROWTH_PROMO_END = "2026-12-23T00:00:00Z"
 DEMO_ALLOWED_ORIGINS = "https://revercue-revercue-proposal-generator.static.hf.space,https://revercue-proposal-generator.static.hf.space"
 BYNARA_API_ENDPOINT = "https://router.bynara.id/v1"
 DEMO_AI_MODEL = "deepseek-v4-flash"
+# Used by the keyless Workers AI fallback (see [ai] above). Override without a
+# code change when Cloudflare retires a model.
+DEMO_WORKERS_AI_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct"
 DEMO_GENERATIONS_PER_HOUR = "4"
 DEMO_EDITS_PER_HOUR = "25"
 DEMO_MAX_BODY_BYTES = "32768"
@@ -104,6 +113,9 @@ WHOP_GROWTH_PROMO_END = "2026-12-23T00:00:00Z"
 DEMO_ALLOWED_ORIGINS = "https://revercue-revercue-proposal-generator.static.hf.space,https://revercue-proposal-generator.static.hf.space"
 BYNARA_API_ENDPOINT = "https://router.bynara.id/v1"
 DEMO_AI_MODEL = "deepseek-v4-flash"
+# Used by the keyless Workers AI fallback (see [ai] above). Override without a
+# code change when Cloudflare retires a model.
+DEMO_WORKERS_AI_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct"
 DEMO_GENERATIONS_PER_HOUR = "4"
 DEMO_EDITS_PER_HOUR = "25"
 DEMO_MAX_BODY_BYTES = "32768"
