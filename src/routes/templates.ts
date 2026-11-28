@@ -7,6 +7,7 @@ import { sanitizeHtml, fetchFromB2, putObject, safeFilename } from '../services/
 import { safeFetchPublic } from '../utils/url-safety';
 import { CUSTOM_TEMPLATE_LIMIT, TEMPLATE_UPLOAD_TYPES, DEFAULT_MAX_UPLOAD_BYTES } from '../config/constants';
 import { jsonError } from '../utils/api-errors';
+import { createSignedToken, verifySignedToken } from '../utils/crypto';
 import type { Bindings } from '../types';
 
 const templates = new Hono<{ Bindings: Bindings }>();
@@ -93,6 +94,74 @@ templates.get('/', async (c) => {
   };
 
   return c.json({ built_in: builtIn.map(mark), custom: custom.map(mark) });
+});
+
+/*
+ * Built-in library shares.
+ *
+ * The 73 built-in templates live in the frontend bundle, so a share link only
+ * has to identify one: the choice is signed, not stored. Redeeming a share
+ * requires a Revercue account (this router is behind userAuthMiddleware), which
+ * is the point — a shared template is a reference layout, not a client
+ * document, so unlike /p/:id, /c/:id and /i/:id it has no public URL.
+ */
+/**
+ * Bundle ids are `builtin-…`; templates published from the admin portal get a
+ * `tpl_…` id, so both shapes are accepted. The recipient resolves the id
+ * against the bundle first and falls back to the server template.
+ */
+const LIBRARY_TEMPLATE_ID = /^[A-Za-z0-9_-]{3,80}$/;
+const LIBRARY_SHARE_TTL_SECONDS = 30 * 24 * 60 * 60;
+
+function isLibraryType(value: unknown): value is 'proposal' | 'contract' {
+  return value === 'proposal' || value === 'contract';
+}
+
+templates.post('/library/share', async (c) => {
+  const auth = getAuth(c);
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+  const templateType = body.template_type;
+  const templateId = String(body.template_id ?? '');
+
+  if (!isLibraryType(templateType)) {
+    return jsonError(c, 400, 'invalid_payload', 'Choose a proposal or contract template.');
+  }
+  if (!LIBRARY_TEMPLATE_ID.test(templateId)) {
+    return jsonError(c, 400, 'invalid_payload', 'That template is not part of the built-in library.');
+  }
+
+  const token = await createSignedToken(c.env.SIGNING_LINK_SECRET || c.env.USER_JWT_KEY, {
+    template_type: templateType,
+    template_id: templateId,
+    shared_by: auth.userId,
+    exp: Math.floor(Date.now() / 1000) + LIBRARY_SHARE_TTL_SECONDS,
+  });
+
+  return c.json({ success: true, token, path: `/settings/shared-template/${token}` }, 201);
+});
+
+templates.get('/library/shared/:token', async (c) => {
+  const verified = await verifySignedToken<{
+    template_type?: string;
+    template_id?: string;
+    shared_by?: string;
+    exp?: number;
+  }>(c.env.SIGNING_LINK_SECRET || c.env.USER_JWT_KEY, c.req.param('token'));
+
+  if (!verified.ok) {
+    return jsonError(c, 400, 'invalid_token', 'This template link is not valid or has expired.');
+  }
+
+  const { template_type: templateType, template_id: templateId } = verified.payload;
+  if (!isLibraryType(templateType) || !templateId || !LIBRARY_TEMPLATE_ID.test(templateId)) {
+    return jsonError(c, 400, 'invalid_token', 'This template link is not valid.');
+  }
+
+  return c.json({
+    template_type: templateType,
+    template_id: templateId,
+    shared_by: verified.payload.shared_by ?? null,
+  });
 });
 
 templates.get('/:id', async (c) => {
