@@ -58,6 +58,14 @@ WHOP_PLAN_GROWTH_STANDARD = "plan_W00KOQQvxNHkr"
 WHOP_PLAN_SCALE = "plan_aDjtVgztfARgY"
 WHOP_GROWTH_PROMO_START = "2026-11-23T00:00:00Z"
 WHOP_GROWTH_PROMO_END = "2026-12-23T00:00:00Z"
+# Public proposal demo (Hugging Face Space). The AI key is a secret
+# (OPENROUTER_API_KEY, holding the NaraRouter key) and is never committed.
+DEMO_ALLOWED_ORIGINS = "https://revercue-revercue-proposal-generator.static.hf.space,https://revercue-proposal-generator.static.hf.space"
+BYNARA_API_ENDPOINT = "https://router.bynara.id/v1"
+DEMO_AI_MODEL = "deepseek-v4-flash"
+DEMO_GENERATIONS_PER_HOUR = "4"
+DEMO_EDITS_PER_HOUR = "25"
+DEMO_MAX_BODY_BYTES = "32768"
 
 [previews.vars]
 ADMIN_USER = "abdullah"
@@ -90,3 +98,12 @@ WHOP_PLAN_GROWTH_STANDARD = "plan_ka3DbHhgt2eP9"
 WHOP_PLAN_SCALE = "plan_o7FrgrytZNCUz"
 WHOP_GROWTH_PROMO_START = "2026-11-23T00:00:00Z"
 WHOP_GROWTH_PROMO_END = "2026-12-23T00:00:00Z"
+
+# Preview: public proposal demo (Hugging Face Space). The AI key is a secret
+# (OPENROUTER_API_KEY, holding the NaraRouter key) and is never committed.
+DEMO_ALLOWED_ORIGINS = "https://revercue-revercue-proposal-generator.static.hf.space,https://revercue-proposal-generator.static.hf.space"
+BYNARA_API_ENDPOINT = "https://router.bynara.id/v1"
+DEMO_AI_MODEL = "deepseek-v4-flash"
+DEMO_GENERATIONS_PER_HOUR = "4"
+DEMO_EDITS_PER_HOUR = "25"
+DEMO_MAX_BODY_BYTES = "32768"

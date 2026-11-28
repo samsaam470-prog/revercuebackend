@@ -106,6 +106,21 @@ export interface Bindings {
   MAX_UPLOAD_BYTES?: string;
   /** "production" enables stricter behaviour (legacy auth off by default). */
   ENVIRONMENT?: string;
+
+  // ---------------------------------------------------------------------------
+  // Public proposal demo (Hugging Face Space)
+  // ---------------------------------------------------------------------------
+  /** NaraRouter key. Historical name; the value is a NaraRouter key. Secret. */
+  OPENROUTER_API_KEY?: string;
+  /** NaraRouter OpenAI-compatible base URL. */
+  BYNARA_API_ENDPOINT?: string;
+  /** Model used by the public demo only. Defaults to deepseek-v4-flash. */
+  DEMO_AI_MODEL?: string;
+  /** Comma separated additional CORS origins for the public demo. */
+  DEMO_ALLOWED_ORIGINS?: string;
+  DEMO_GENERATIONS_PER_HOUR?: string;
+  DEMO_EDITS_PER_HOUR?: string;
+  DEMO_MAX_BODY_BYTES?: string;
 }
 
 /** Authenticated request context set by the shared auth middleware. */
